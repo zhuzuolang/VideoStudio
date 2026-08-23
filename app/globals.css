@@ -347,6 +347,7 @@ button:disabled {
 }
 
 .sidebar-user {
+  position: relative;
   display: grid;
   grid-template-columns: 32px 1fr auto;
   align-items: center;
@@ -421,6 +422,7 @@ button:disabled {
 }
 
 .topbar-center {
+  position: relative;
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
@@ -450,6 +452,66 @@ button:disabled {
   font-size: 9px;
   background: var(--panel-soft);
 }
+
+.search-results {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  max-height: min(420px, calc(100vh - 100px));
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 50px rgba(27, 26, 23, 0.16);
+}
+
+.search-results button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 7px;
+  text-align: left;
+  background: transparent;
+}
+
+.search-results button:hover,
+.search-results button:focus-visible { background: var(--panel-soft); }
+.search-results button span { display: grid; gap: 2px; min-width: 0; }
+.search-results button b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.search-results button small, .search-empty { color: var(--muted); font-size: 9px; }
+.search-empty { padding: 14px 10px; text-align: center; }
+
+.notification-control { position: relative; }
+
+.shell-popover {
+  position: absolute;
+  z-index: 90;
+  width: min(290px, calc(100vw - 28px));
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 18px 50px rgba(27, 26, 23, 0.18);
+}
+
+.notification-popover { top: calc(100% + 9px); right: 0; }
+.sidebar-popover { right: 0; bottom: calc(100% + 8px); left: 0; width: auto; }
+.shell-popover > div { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.shell-popover > div:first-child:not(:last-child) { margin-bottom: 8px; }
+.shell-popover p { margin: 8px 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.shell-popover small { display: block; color: var(--muted); font-size: 9px; }
+.shell-popover .popover-close { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; }
+.shell-popover .popover-close:hover { background: var(--panel-soft); }
+.sidebar-user .sidebar-popover > div { display: grid; justify-content: initial; }
+.sidebar-user .sidebar-popover .quiet-button { width: 100%; margin-top: 6px; border: 1px solid var(--line); color: var(--ink); background: var(--panel-soft); }
 
 .topbar-right {
   justify-content: flex-end;
@@ -646,6 +708,7 @@ button:disabled {
   position: absolute;
   top: -34px;
   right: -25px;
+  pointer-events: none;
   width: 100px;
   height: 100px;
   border: 18px solid rgba(223, 243, 107, 0.12);
@@ -755,6 +818,7 @@ button:disabled {
   position: absolute;
   right: 12%;
   bottom: -75px;
+  pointer-events: none;
   width: 180px;
   height: 180px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1403,6 +1467,7 @@ button:disabled {
   position: absolute;
   right: -60px;
   bottom: -100px;
+  pointer-events: none;
   width: 240px;
   height: 240px;
   border: 1px solid rgba(255, 255, 255, 0.08);

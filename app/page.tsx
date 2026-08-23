@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element -- project assets can use authenticated or user-configured URLs. */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertCircle,
@@ -124,6 +124,28 @@ type SceneRecord = ScriptScene & {
   status?: string;
 };
 
+type SearchResult = {
+  id: string;
+  view: ViewId;
+  title: string;
+  detail: string;
+  agentRunId?: string;
+};
+
+function storyToDraft(story: StoryRecord | null) {
+  return {
+    title: story?.title ?? "",
+    logline: story?.logline ?? "",
+    synopsis: story?.synopsis ?? "",
+    worldview: story?.worldview ?? "",
+    coreConflict: story?.coreConflict ?? "",
+    themes: story?.themes?.join("、") ?? "",
+    styleReference: story?.styleReference ?? "",
+    storyBible: story?.storyBible ?? "",
+    status: story?.status ?? "draft",
+  };
+}
+
 const productionNav: NavItem[] = [
   { id: "overview", label: "项目总览", icon: LayoutDashboard },
   { id: "story", label: "故事设计", icon: BookOpenText },
@@ -190,7 +212,7 @@ function LoadingWorkspace() {
   );
 }
 
-function OverviewView({ data, navigate }: { data: WorkspaceBootstrap; navigate: (view: ViewId) => void }) {
+function OverviewView({ data, navigate, onOpenRun }: { data: WorkspaceBootstrap; navigate: (view: ViewId) => void; onOpenRun: (runId: string) => void }) {
   const project = data.project;
   const story = data.story as StoryRecord | null;
   const episodes = data.episodes as EpisodeRecord[];
@@ -229,7 +251,7 @@ function OverviewView({ data, navigate }: { data: WorkspaceBootstrap; navigate: 
         <div className="surface recent-runs">
           <div className="section-heading"><div><span className="section-kicker">AGENT HISTORY</span><h2>最近分析</h2></div><button className="round-add" aria-label="进入 Agent" onClick={() => navigate("agent")}><ArrowRight size={16} /></button></div>
           <div className="run-compact-list">
-            {data.agentRuns.slice(0, 4).map((run) => <button key={run.id} onClick={() => navigate("agent")}><span className={`run-dot ${run.status}`} /><span><b>{run.modelName}</b><small>{run.prompt}</small></span><em>{run.status === "completed" ? "已完成" : run.status === "failed" ? "失败" : "运行中"}</em></button>)}
+            {data.agentRuns.slice(0, 4).map((run) => <button key={run.id} onClick={() => onOpenRun(run.id)}><span className={`run-dot ${run.status}`} /><span><b>{run.modelName}</b><small>{run.prompt}</small></span><em>{run.status === "completed" ? "已完成" : run.status === "failed" ? "失败" : "运行中"}</em></button>)}
             {data.agentRuns.length === 0 && <div className="compact-empty"><Bot size={20} /><span>还没有 Agent 运行记录</span></div>}
           </div>
         </div>
@@ -242,17 +264,13 @@ function StoryView({ projectId, story, episodes, onSaved }: { projectId: string;
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
-  const [draft, setDraft] = useState(() => ({
-      title: story?.title ?? "",
-      logline: story?.logline ?? "",
-      synopsis: story?.synopsis ?? "",
-      worldview: story?.worldview ?? "",
-      coreConflict: story?.coreConflict ?? "",
-      themes: story?.themes?.join("、") ?? "",
-      styleReference: story?.styleReference ?? "",
-      storyBible: story?.storyBible ?? "",
-      status: story?.status ?? "draft",
-    }));
+  const [draft, setDraft] = useState(() => storyToDraft(story));
+
+  function cancelEditing() {
+    setDraft(storyToDraft(story));
+    setMessage("");
+    setEditing(false);
+  }
 
   async function save() {
     setSaving(true);
@@ -277,7 +295,7 @@ function StoryView({ projectId, story, episodes, onSaved }: { projectId: string;
       <section className="story-editor surface">
         <div className="section-heading">
           <div><span className="section-kicker">SAVED STORY STATE</span><h2>{story?.title || "未命名故事"}</h2></div>
-          <div className="heading-actions"><span className="persisted-label"><Database size={13} /> 已持久化</span>{editing ? <><button className="quiet-button" onClick={() => setEditing(false)}>取消</button><button className="primary-button" onClick={save} disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} 保存</button></> : <button className="quiet-button" onClick={() => setEditing(true)}><PencilLine size={15} /> 编辑故事</button>}</div>
+          <div className="heading-actions"><span className="persisted-label"><Database size={13} /> 已持久化</span>{editing ? <><button className="quiet-button" onClick={cancelEditing} disabled={saving}>取消</button><button className="primary-button" onClick={save} disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} 保存</button></> : <button className="quiet-button" onClick={() => { setDraft(storyToDraft(story)); setMessage(""); setEditing(true); }}><PencilLine size={15} /> 编辑故事</button>}</div>
         </div>
         {message && <div className="inline-message" role="status">{message}</div>}
         <div className="story-form-grid">
@@ -302,7 +320,39 @@ function CharactersView({ projectId, characters, onSaved }: { projectId: string;
   const [dialogOpen, setDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [form, setForm] = useState({ name: "", role: "", bio: "", appearance: "", personality: "", arc: "", voice: "" });
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  const resetForm = useCallback(() => {
+    setForm({ name: "", role: "", bio: "", appearance: "", personality: "", arc: "", voice: "" });
+    setError("");
+  }, []);
+
+  const closeDialog = useCallback(() => {
+    if (saving) return;
+    setDialogOpen(false);
+    resetForm();
+  }, [resetForm, saving]);
+
+  useEffect(() => {
+    if (!dialogOpen) return;
+    const focusTimer = window.setTimeout(() => nameInputRef.current?.focus(), 0);
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) closeDialog();
+    }
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [closeDialog, dialogOpen, saving]);
+
+  function openDialog() {
+    resetForm();
+    setMessage("");
+    setDialogOpen(true);
+  }
 
   async function createCharacter(event: React.FormEvent) {
     event.preventDefault();
@@ -310,9 +360,15 @@ function CharactersView({ projectId, characters, onSaved }: { projectId: string;
     setError("");
     try {
       await apiRequest(`/api/projects/${encodeURIComponent(projectId)}/characters`, { method: "POST", body: JSON.stringify(form) });
-      await onSaved();
       setDialogOpen(false);
-      setForm({ name: "", role: "", bio: "", appearance: "", personality: "", arc: "", voice: "" });
+      resetForm();
+      setMessage("人物已保存，正在刷新人物列表。");
+      try {
+        await onSaved();
+        setMessage("人物已保存到当前项目。");
+      } catch {
+        setMessage("人物已保存，但列表刷新失败；请使用顶栏刷新按钮重试。");
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "人物保存失败");
     } finally {
@@ -322,19 +378,21 @@ function CharactersView({ projectId, characters, onSaved }: { projectId: string;
 
   return (
     <div className="view-stack">
-      <div className="view-toolbar"><div><Database size={15} /><span>{characters.length} 张人物卡来自当前项目数据库</span></div><button className="primary-button" onClick={() => setDialogOpen(true)}><Plus size={15} /> 新增人物</button></div>
+      <div className="view-toolbar"><div><Database size={15} /><span>{characters.length} 张人物卡来自当前项目数据库</span></div><button className="primary-button" onClick={openDialog}><Plus size={15} /> 新增人物</button></div>
+      {message && <div className="inline-message" role="status">{message}</div>}
       <section className="character-grid">
         {characters.map((character, index) => <article className="character-card" key={character.id}><div className={`character-portrait ${["coral", "blue", "sand"][index % 3]}`}><span>{character.name.slice(0, 1)}</span><small>{character.status}</small></div><div className="character-content"><div className="character-title"><div><h2>{character.name}</h2><p>{character.role}</p></div><MoreHorizontal size={17} /></div><dl><div><dt>人物小传</dt><dd>{character.bio || "待补充"}</dd></div><div><dt>视觉锚点</dt><dd>{character.appearance || "待补充"}</dd></div><div><dt>人物弧</dt><dd>{character.arc || "待补充"}</dd></div></dl><div className="character-footer"><span><Database size={12} /> {character.status}</span><span>{character.relationships?.length ?? 0} 条关系</span></div></div></article>)}
-        {characters.length === 0 && <button className="add-character" onClick={() => setDialogOpen(true)}><Plus size={24} /><b>创建第一位角色</b><span>角色会被保存到当前项目</span></button>}
+        {characters.length === 0 && <button className="add-character" onClick={openDialog}><Plus size={24} /><b>创建第一位角色</b><span>角色会被保存到当前项目</span></button>}
       </section>
-      {dialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialogOpen(false); }}><form className="modal-card" onSubmit={createCharacter}><div className="modal-head"><div><span className="section-kicker">NEW CHARACTER</span><h2>新增人物卡</h2></div><button type="button" className="icon-button" aria-label="关闭" onClick={() => setDialogOpen(false)}><X size={17} /></button></div><div className="modal-fields"><label><span>姓名 *</span><input required value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} /></label><label><span>角色定位</span><input value={form.role} onChange={(event) => setForm((current) => ({ ...current, role: event.target.value }))} placeholder="主角 / 反派 / 关键角色" /></label><label className="wide"><span>人物小传</span><textarea rows={3} value={form.bio} onChange={(event) => setForm((current) => ({ ...current, bio: event.target.value }))} /></label><label><span>外形与视觉锚点</span><textarea rows={3} value={form.appearance} onChange={(event) => setForm((current) => ({ ...current, appearance: event.target.value }))} /></label><label><span>性格</span><textarea rows={3} value={form.personality} onChange={(event) => setForm((current) => ({ ...current, personality: event.target.value }))} /></label><label><span>人物弧</span><textarea rows={3} value={form.arc} onChange={(event) => setForm((current) => ({ ...current, arc: event.target.value }))} /></label><label><span>声音设定</span><textarea rows={3} value={form.voice} onChange={(event) => setForm((current) => ({ ...current, voice: event.target.value }))} /></label></div>{error && <div className="form-error"><AlertCircle size={14} />{error}</div>}<div className="modal-actions"><button type="button" className="quiet-button" onClick={() => setDialogOpen(false)}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Database size={15} />} 保存人物</button></div></form></div>}
+      {dialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) closeDialog(); }}><form className="modal-card" role="dialog" aria-modal="true" aria-labelledby="character-dialog-title" onSubmit={createCharacter}><div className="modal-head"><div><span className="section-kicker">NEW CHARACTER</span><h2 id="character-dialog-title">新增人物卡</h2></div><button type="button" className="icon-button" aria-label="关闭" onClick={closeDialog} disabled={saving}><X size={17} /></button></div><div className="modal-fields"><label><span>姓名 *</span><input ref={nameInputRef} required value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} /></label><label><span>角色定位</span><input value={form.role} onChange={(event) => setForm((current) => ({ ...current, role: event.target.value }))} placeholder="主角 / 反派 / 关键角色" /></label><label className="wide"><span>人物小传</span><textarea rows={3} value={form.bio} onChange={(event) => setForm((current) => ({ ...current, bio: event.target.value }))} /></label><label><span>外形与视觉锚点</span><textarea rows={3} value={form.appearance} onChange={(event) => setForm((current) => ({ ...current, appearance: event.target.value }))} /></label><label><span>性格</span><textarea rows={3} value={form.personality} onChange={(event) => setForm((current) => ({ ...current, personality: event.target.value }))} /></label><label><span>人物弧</span><textarea rows={3} value={form.arc} onChange={(event) => setForm((current) => ({ ...current, arc: event.target.value }))} /></label><label><span>声音设定</span><textarea rows={3} value={form.voice} onChange={(event) => setForm((current) => ({ ...current, voice: event.target.value }))} /></label></div>{error && <div className="form-error"><AlertCircle size={14} />{error}</div>}<div className="modal-actions"><button type="button" className="quiet-button" onClick={closeDialog} disabled={saving}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Database size={15} />} 保存人物</button></div></form></div>}
     </div>
   );
 }
 
 function ScriptsView({ scripts, onOpenAgent }: { scripts: ProjectScript[]; onOpenAgent: () => void }) {
   const [selectedId, setSelectedId] = useState(scripts[0]?.id ?? "");
-  const script = scripts.find((item) => item.id === selectedId) ?? scripts[0];
+  const effectiveSelectedId = scripts.some((item) => item.id === selectedId) ? selectedId : scripts[0]?.id ?? "";
+  const script = scripts.find((item) => item.id === effectiveSelectedId) ?? scripts[0];
   const scenes = (script?.scenes ?? []) as SceneRecord[];
   if (!script) return <div className="platform-state"><FileText size={24} /><div><b>当前项目还没有剧本</b><span>可从分集大纲创建第一份剧本。</span></div></div>;
   return (
@@ -368,15 +426,33 @@ function NewProjectDialog({ onClose, onCreated }: { onClose: () => void; onCreat
   const [form, setForm] = useState({ name: "", genre: "都市悬疑", description: "", episodeCount: "12", singleEpisodeDuration: "120", aspectRatio: "9:16", targetPlatform: "抖音 / 快手" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  const closeDialog = useCallback(() => {
+    if (!saving) onClose();
+  }, [onClose, saving]);
+
+  useEffect(() => {
+    const focusTimer = window.setTimeout(() => nameInputRef.current?.focus(), 0);
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) closeDialog();
+    }
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [closeDialog, saving]);
+
   async function submit(event: React.FormEvent) {
     event.preventDefault(); setSaving(true); setError("");
     try {
       const result = await apiRequest<{ project: Project; activeProjectId: string }>("/api/projects", { method: "POST", body: JSON.stringify({ ...form, episodeCount: Number(form.episodeCount), singleEpisodeDuration: Number(form.singleEpisodeDuration) }) });
-      await onCreated(result.project.id);
       onClose();
+      void onCreated(result.project.id);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "项目创建失败"); } finally { setSaving(false); }
   }
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><form className="modal-card project-modal" onSubmit={submit}><div className="modal-head"><div><span className="section-kicker">NEW PROJECT</span><h2>创建短剧项目</h2><p>项目创建后将自动拥有独立的故事、剧本和资产空间。</p></div><button type="button" className="icon-button" aria-label="关闭" onClick={onClose}><X size={17} /></button></div><div className="modal-fields"><label><span>项目名称 *</span><input required value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如：雾港来信" /></label><label><span>题材</span><input value={form.genre} onChange={(event) => setForm((current) => ({ ...current, genre: event.target.value }))} /></label><label className="wide"><span>项目简介</span><textarea rows={3} value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} /></label><label><span>集数</span><input type="number" min="1" max="500" value={form.episodeCount} onChange={(event) => setForm((current) => ({ ...current, episodeCount: event.target.value }))} /></label><label><span>单集时长（秒）</span><input type="number" min="15" value={form.singleEpisodeDuration} onChange={(event) => setForm((current) => ({ ...current, singleEpisodeDuration: event.target.value }))} /></label><label><span>画幅</span><select value={form.aspectRatio} onChange={(event) => setForm((current) => ({ ...current, aspectRatio: event.target.value }))}><option>9:16</option><option>16:9</option><option>1:1</option></select></label><label><span>目标平台</span><input value={form.targetPlatform} onChange={(event) => setForm((current) => ({ ...current, targetPlatform: event.target.value }))} /></label></div>{error && <div className="form-error"><AlertCircle size={14} />{error}</div>}<div className="modal-actions"><button type="button" className="quiet-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} 创建并进入</button></div></form></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) closeDialog(); }}><form className="modal-card project-modal" role="dialog" aria-modal="true" aria-labelledby="new-project-dialog-title" onSubmit={submit}><div className="modal-head"><div><span className="section-kicker">NEW PROJECT</span><h2 id="new-project-dialog-title">创建短剧项目</h2><p>项目创建后将自动拥有独立的故事、剧本和资产空间。</p></div><button type="button" className="icon-button" aria-label="关闭" onClick={closeDialog} disabled={saving}><X size={17} /></button></div><div className="modal-fields"><label><span>项目名称 *</span><input ref={nameInputRef} required value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="例如：雾港来信" /></label><label><span>题材</span><input value={form.genre} onChange={(event) => setForm((current) => ({ ...current, genre: event.target.value }))} /></label><label className="wide"><span>项目简介</span><textarea rows={3} value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} /></label><label><span>集数</span><input type="number" min="1" max="500" required value={form.episodeCount} onChange={(event) => setForm((current) => ({ ...current, episodeCount: event.target.value }))} /></label><label><span>单集时长（秒）</span><input type="number" min="15" required value={form.singleEpisodeDuration} onChange={(event) => setForm((current) => ({ ...current, singleEpisodeDuration: event.target.value }))} /></label><label><span>画幅</span><select value={form.aspectRatio} onChange={(event) => setForm((current) => ({ ...current, aspectRatio: event.target.value }))}><option>9:16</option><option>16:9</option><option>1:1</option></select></label><label><span>目标平台</span><input value={form.targetPlatform} onChange={(event) => setForm((current) => ({ ...current, targetPlatform: event.target.value }))} /></label></div>{error && <div className="form-error"><AlertCircle size={14} />{error}</div>}<div className="modal-actions"><button type="button" className="quiet-button" onClick={closeDialog} disabled={saving}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} 创建并进入</button></div></form></div>;
 }
 
 export default function Home() {
@@ -387,19 +463,41 @@ export default function Home() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [switchingProject, setSwitchingProject] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const workspaceRequestSequence = useRef(0);
+  const workspaceTargetProjectId = useRef<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const loadWorkspace = useCallback(async (projectId?: string, quiet = false) => {
-    if (!quiet) setLoading(true);
+    if (projectId && workspaceTargetProjectId.current && projectId !== workspaceTargetProjectId.current) return false;
+    const sequence = ++workspaceRequestSequence.current;
+    if (quiet) setRefreshing(true);
+    else setLoading(true);
     setError("");
     try {
       const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
       const workspace = await apiRequest<WorkspaceBootstrap>(`/api/bootstrap${query}`, { cache: "no-store" });
+      if (sequence !== workspaceRequestSequence.current) return false;
+      if (projectId && workspaceTargetProjectId.current && projectId !== workspaceTargetProjectId.current) return false;
       setData(workspace);
+      workspaceTargetProjectId.current = workspace.activeProjectId;
+      setRefreshKey((current) => current + 1);
+      return true;
     } catch (reason) {
+      if (sequence !== workspaceRequestSequence.current) return false;
       setError(reason instanceof Error ? reason.message : "无法加载项目数据库");
+      return false;
     } finally {
-      setLoading(false);
-      setSwitchingProject(false);
+      if (sequence === workspaceRequestSequence.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
@@ -408,20 +506,82 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [loadWorkspace]);
 
-  const navigate = useCallback((view: ViewId) => { setActiveView(view); setMobileNavOpen(false); }, []);
+  const navigate = useCallback((view: ViewId) => {
+    if (view === "agent") setSelectedAgentRunId(null);
+    setActiveView(view);
+    setMobileNavOpen(false);
+    setSearchOpen(false);
+    setNotificationsOpen(false);
+    setUserMenuOpen(false);
+  }, []);
   const currentCopy = viewCopy[activeView];
   const project = data?.project ?? null;
   const userInitial = data?.workspace.displayName?.slice(0, 1) || "影";
 
+  const searchResults = useMemo<SearchResult[]>(() => {
+    const needle = search.trim().toLocaleLowerCase("zh-CN");
+    if (!needle || !data) return [];
+    const results: SearchResult[] = [];
+    const add = (result: SearchResult, haystack: string) => {
+      if (haystack.toLocaleLowerCase("zh-CN").includes(needle)) results.push(result);
+    };
+    for (const character of data.characters) {
+      add({ id: `character-${character.id}`, view: "characters", title: character.name || "未命名人物", detail: "人物卡" }, `${character.name ?? ""} ${String(character.role ?? "")} ${String(character.bio ?? "")}`);
+    }
+    for (const script of data.scripts) {
+      add({ id: `script-${script.id}`, view: "scripts", title: script.title || "未命名剧本", detail: `剧本 · ${script.scenes?.length ?? 0} 场` }, `${script.title ?? ""} ${script.status ?? ""} ${String(script.bodyText ?? script.content ?? "")}`);
+    }
+    for (const asset of data.assets) {
+      add({ id: `asset-${asset.id}`, view: "assets", title: asset.name, detail: `资产 · ${asset.type}` }, `${asset.name} ${asset.description ?? ""} ${asset.type}`);
+    }
+    for (const run of data.agentRuns) {
+      add({ id: `run-${run.id}`, view: "agent", title: run.prompt || "未命名分析", detail: `Agent · ${run.modelName}`, agentRunId: run.id }, `${run.prompt} ${run.modelName} ${run.response ?? ""}`);
+    }
+    return results.slice(0, 10);
+  }, [data, search]);
+
+  const openAgentRun = useCallback((runId: string) => {
+    setSelectedAgentRunId(runId);
+    setActiveView("agent");
+    setMobileNavOpen(false);
+    setSearchOpen(false);
+  }, []);
+
+  function openSearchResult(result: SearchResult) {
+    setSearch("");
+    if (result.agentRunId) openAgentRun(result.agentRunId);
+    else navigate(result.view);
+  }
+
+  useEffect(() => {
+    function handleGlobalKeyDown(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase("en-US") === "k") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        setSearchOpen(true);
+      } else if (event.key === "Escape") {
+        setSearchOpen(false);
+        setNotificationsOpen(false);
+        setUserMenuOpen(false);
+      }
+    }
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, []);
+
   async function switchProject(projectId: string) {
-    if (!projectId || projectId === data?.activeProjectId) return;
+    if (!projectId || projectId === data?.activeProjectId || switchingProject || refreshing) return;
     setSwitchingProject(true);
+    setSelectedAgentRunId(null);
+    workspaceTargetProjectId.current = projectId;
     try {
       await apiRequest(`/api/projects/${encodeURIComponent(projectId)}/activate`, { method: "POST" });
       await loadWorkspace(projectId, true);
     } catch (reason) {
-      setSwitchingProject(false);
+      workspaceTargetProjectId.current = data?.activeProjectId ?? null;
       setError(reason instanceof Error ? reason.message : "项目切换失败");
+    } finally {
+      setSwitchingProject(false);
     }
   }
 
@@ -432,8 +592,8 @@ export default function Home() {
         <div className="brand-lockup"><div className="brand-mark"><span /><span /></div><div><b>影序</b><small>FRAMEFLOW</small></div><button className="sidebar-close" aria-label="关闭菜单" onClick={() => setMobileNavOpen(false)}><X size={18} /></button></div>
         <div className="db-project-switcher">
           <label htmlFor="project-switcher">当前项目</label>
-          <div><span className="project-avatar">{project?.name?.slice(0, 1) || "项"}</span><select id="project-switcher" value={data?.activeProjectId ?? ""} disabled={!data || switchingProject} onChange={(event) => void switchProject(event.target.value)}>{data?.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{switchingProject ? <LoaderCircle className="spin" size={15} /> : <ChevronDown size={15} />}</div>
-          <button type="button" onClick={() => setNewProjectOpen(true)}><Plus size={14} /> 新建项目</button>
+          <div><span className="project-avatar">{project?.name?.slice(0, 1) || "项"}</span><select id="project-switcher" value={data?.activeProjectId ?? ""} disabled={!data || switchingProject || refreshing} onChange={(event) => void switchProject(event.target.value)}>{data?.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{switchingProject || refreshing ? <LoaderCircle className="spin" size={15} /> : <ChevronDown size={15} />}</div>
+          <button type="button" onClick={() => setNewProjectOpen(true)} disabled={switchingProject || refreshing}><Plus size={14} /> 新建项目</button>
         </div>
         <div className="nav-label">项目制作流程</div>
         <nav className="stage-nav" aria-label="项目制作阶段">
@@ -443,29 +603,29 @@ export default function Home() {
         <nav className="stage-nav global-stage-nav" aria-label="跨项目设置">{globalNav.map((item) => { const Icon = item.icon; return <button key={item.id} className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)}><span className="nav-icon"><Icon size={17} /></span><span className="nav-copy"><b>{item.label}</b><small>{data?.models.length ?? 0} 个配置</small></span><Database className="nav-state" size={15} /></button>; })}</nav>
         <div className="sidebar-spacer" />
         <div className="backend-health"><div><Database size={15} /><span><b>后端服务</b><small>D1 数据库 · R2 资产存储</small></span><i /></div><p>项目数据、模型配置和 Agent 记录均由服务端管理。</p></div>
-        <div className="sidebar-user"><span className="user-avatar">{userInitial}</span><span><b>{data?.workspace.displayName || "正在认证"}</b><small>{data?.workspace.email || "私密工作区"}</small></span><button><MoreHorizontal size={17} /></button></div>
+        <div className="sidebar-user"><span className="user-avatar">{userInitial}</span><span><b>{data?.workspace.displayName || "正在认证"}</b><small>{data?.workspace.email || "私密工作区"}</small></span><button type="button" aria-label="打开用户信息" aria-expanded={userMenuOpen} aria-controls="user-info-panel" onClick={() => { setUserMenuOpen((current) => !current); setNotificationsOpen(false); }}><MoreHorizontal size={17} /></button>{userMenuOpen && <div id="user-info-panel" className="shell-popover sidebar-popover" role="dialog" aria-label="用户信息"><div><b>{data?.workspace.displayName || "当前用户"}</b><small>{data?.workspace.email || "私密工作区"}</small></div><p>当前为私密工作区，项目数据按账户隔离。</p><button type="button" className="quiet-button" onClick={() => setUserMenuOpen(false)}>关闭</button></div>}</div>
       </aside>
 
       <div className="app-stage">
-        <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="打开项目导航" onClick={() => setMobileNavOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>{activeView === "models" ? "跨项目" : project?.name || "项目"}</span><ChevronRight size={13} /><b>{currentCopy.title}</b></div></div><div className="topbar-center"><Search size={15} /><input aria-label="搜索项目内容" placeholder="搜索人物、剧本、资产或 Agent 记录" /><kbd>⌘ K</kbd></div><div className="topbar-right"><span className="database-pill"><Database size={12} /> 数据已持久化</span><button className="icon-button" aria-label="刷新数据" onClick={() => void loadWorkspace(data?.activeProjectId ?? undefined, true)}><RefreshCw size={16} /></button><button className="icon-button" aria-label="通知"><Bell size={16} /></button></div></header>
+        <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="打开项目导航" onClick={() => setMobileNavOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>{activeView === "models" ? "跨项目" : project?.name || "项目"}</span><ChevronRight size={13} /><b>{currentCopy.title}</b></div></div><div className="topbar-center" onFocus={() => setSearchOpen(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSearchOpen(false); }}><Search size={15} /><input ref={searchInputRef} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" value={search} onChange={(event) => { setSearch(event.target.value); setSearchOpen(true); }} aria-label="搜索项目内容" aria-controls="workspace-search-results" aria-expanded={searchOpen && Boolean(search.trim())} placeholder="搜索人物、剧本、资产或 Agent 记录" /><kbd>⌘ K</kbd>{searchOpen && search.trim() && <div id="workspace-search-results" className="search-results" role="listbox" aria-label="搜索结果">{searchResults.length > 0 ? searchResults.map((result) => <button type="button" role="option" aria-selected="false" key={result.id} onClick={() => openSearchResult(result)}><span><b>{result.title}</b><small>{result.detail}</small></span><ChevronRight size={14} /></button>) : <div className="search-empty" role="status">当前项目没有匹配内容</div>}</div>}</div><div className="topbar-right"><span className="database-pill"><Database size={12} /> {refreshing ? "正在同步" : "数据已持久化"}</span><button className="icon-button" aria-label={refreshing ? "正在刷新数据" : "刷新数据"} onClick={() => void loadWorkspace(workspaceTargetProjectId.current ?? data?.activeProjectId ?? undefined, true)} disabled={loading || refreshing || switchingProject}>{refreshing ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}</button><div className="notification-control"><button className="icon-button" type="button" aria-label="查看通知" aria-expanded={notificationsOpen} aria-controls="notification-panel" onClick={() => { setNotificationsOpen((current) => !current); setUserMenuOpen(false); }}><Bell size={16} /></button>{notificationsOpen && <div id="notification-panel" className="shell-popover notification-popover" role="dialog" aria-label="通知"><div><b>工作区状态</b><button type="button" className="popover-close" aria-label="关闭通知" onClick={() => setNotificationsOpen(false)}><X size={14} /></button></div><p>{error ? `最近一次同步失败：${error}` : `当前项目有 ${data?.agentRuns.length ?? 0} 条 Agent 记录、${data?.assets.length ?? 0} 项资产。`}</p><small>{refreshing ? "正在获取最新数据…" : "暂无其他未读通知"}</small></div>}</div></div></header>
         <main className="main-workspace full-width-workspace">
           {loading ? <LoadingWorkspace /> : error && !data ? <div className="platform-state error-state"><AlertCircle size={24} /><div><b>无法连接后端</b><span>{error}</span><button className="quiet-button" onClick={() => void loadWorkspace()}><RefreshCw size={14} /> 重试</button></div></div> : data && project ? <>
-            <div className="page-heading"><div><span className="page-kicker">{currentCopy.kicker}</span><div className="title-row"><h1>{currentCopy.title}</h1><span className="version-badge">{activeView === "models" ? "跨项目通用" : project.name}</span></div><p>{currentCopy.description}</p></div><div className="heading-actions">{activeView !== "agent" && activeView !== "models" && <button className="quiet-button" onClick={() => navigate("agent")}><Bot size={15} /> 交给 Agent</button>}{activeView !== "models" && <button className="primary-button" onClick={() => navigate("assets")}><Plus size={15} /> 添加资产</button>}</div></div>
+            <div className="page-heading"><div><span className="page-kicker">{currentCopy.kicker}</span><div className="title-row"><h1>{currentCopy.title}</h1><span className="version-badge">{activeView === "models" ? "跨项目通用" : project.name}</span></div><p>{currentCopy.description}</p></div><div className="heading-actions">{activeView !== "agent" && activeView !== "models" && <button className="quiet-button" onClick={() => navigate("agent")}><Bot size={15} /> 交给 Agent</button>}{activeView !== "models" && activeView !== "assets" && <button className="primary-button" onClick={() => navigate("assets")}><Plus size={15} /> 添加资产</button>}</div></div>
             {error && <div className="workspace-alert"><AlertCircle size={15} />{error}<button onClick={() => setError("")}><X size={14} /></button></div>}
-            {activeView === "overview" && <OverviewView data={data} navigate={navigate} />}
-            {activeView === "story" && <StoryView key={`${project.id}-${String((data.story as StoryRecord | null)?.updatedAt ?? "new")}`} projectId={project.id} story={data.story as StoryRecord | null} episodes={data.episodes as EpisodeRecord[]} onSaved={() => loadWorkspace(project.id, true)} />}
-            {activeView === "characters" && <CharactersView projectId={project.id} characters={data.characters as CharacterRecord[]} onSaved={() => loadWorkspace(project.id, true)} />}
-            {activeView === "scripts" && <ScriptsView scripts={data.scripts} onOpenAgent={() => navigate("agent")} />}
+            {activeView === "overview" && <OverviewView data={data} navigate={navigate} onOpenRun={openAgentRun} />}
+            {activeView === "story" && <StoryView key={`${project.id}-${String((data.story as StoryRecord | null)?.updatedAt ?? "new")}`} projectId={project.id} story={data.story as StoryRecord | null} episodes={data.episodes as EpisodeRecord[]} onSaved={async () => { await loadWorkspace(project.id, true); }} />}
+            {activeView === "characters" && <CharactersView key={project.id} projectId={project.id} characters={data.characters as CharacterRecord[]} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("人物列表刷新失败"); }} />}
+            {activeView === "scripts" && <ScriptsView key={project.id} scripts={data.scripts} onOpenAgent={() => navigate("agent")} />}
             {activeView === "breakdown" && <BreakdownView scripts={data.scripts} />}
-            {activeView === "assets" && <AssetManager projectId={project.id} projectName={project.name} onAssetsChange={(assets) => setData((current) => current ? { ...current, assets } : current)} />}
+            {activeView === "assets" && <AssetManager key={project.id} refreshKey={refreshKey} projectId={project.id} projectName={project.name} onAssetsChange={(assets) => setData((current) => current?.project?.id === project.id ? { ...current, assets } : current)} />}
             {activeView === "shots" && <ShotsView scripts={data.scripts} assets={data.assets} onAssets={() => navigate("assets")} />}
-            {activeView === "agent" && <AgentStudio projectId={project.id} projectName={project.name} onOpenModels={() => navigate("models")} onRunComplete={(run) => setData((current) => current ? { ...current, agentRuns: [run, ...current.agentRuns.filter((item) => item.id !== run.id)] } : current)} />}
+            {activeView === "agent" && <AgentStudio key={project.id} refreshKey={refreshKey} initialRunId={selectedAgentRunId ?? undefined} projectId={project.id} projectName={project.name} onOpenModels={() => navigate("models")} onRunComplete={(run) => setData((current) => current?.project?.id === project.id && run.projectId === project.id ? { ...current, agentRuns: [run, ...current.agentRuns.filter((item) => item.id !== run.id)] } : current)} />}
             {activeView === "delivery" && <DeliveryView assets={data.assets} runs={data.agentRuns} onAgent={() => navigate("agent")} />}
-            {activeView === "models" && <ModelCenter onModelsChange={(models: AiModel[]) => setData((current) => current ? { ...current, models } : current)} />}
+            {activeView === "models" && <ModelCenter refreshKey={refreshKey} onModelsChange={(models: AiModel[]) => setData((current) => current ? { ...current, models } : current)} />}
           </> : null}
         </main>
       </div>
-      {newProjectOpen && <NewProjectDialog onClose={() => setNewProjectOpen(false)} onCreated={(projectId) => loadWorkspace(projectId, true)} />}
+      {newProjectOpen && <NewProjectDialog onClose={() => setNewProjectOpen(false)} onCreated={async (projectId) => { workspaceTargetProjectId.current = projectId; await loadWorkspace(projectId, true); }} />}
     </div>
   );
 }

@@ -20,10 +20,7 @@
   box-sizing: border-box;
 }
 
-.moduleRoot button,
-.moduleRoot input,
-.moduleRoot select,
-.moduleRoot textarea {
+.moduleRoot :where(button, input, select, textarea) {
   color: inherit;
   font: inherit;
 }
@@ -721,7 +718,9 @@
 
 .assetPreview::after {
   position: absolute;
+  z-index: 2;
   inset: 0;
+  pointer-events: none;
   background: linear-gradient(180deg, transparent 55%, rgba(0, 0, 0, .34));
   content: "";
 }

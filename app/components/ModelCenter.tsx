@@ -21,6 +21,7 @@ import styles from "./PlatformModules.module.css";
 
 type ModelCenterProps = {
   className?: string;
+  refreshKey?: number;
   onModelsChange?: (models: AiModel[]) => void;
 };
 
@@ -99,7 +100,7 @@ function ModelAvatar({ model }: { model: AiModel }) {
   );
 }
 
-export default function ModelCenter({ className, onModelsChange }: ModelCenterProps) {
+export default function ModelCenter({ className, refreshKey, onModelsChange }: ModelCenterProps) {
   const [models, setModels] = useState<AiModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -108,34 +109,38 @@ export default function ModelCenter({ className, onModelsChange }: ModelCenterPr
   const [form, setForm] = useState<ModelForm>(EMPTY_FORM);
   const [formErrors, setFormErrors] = useState<ModelFormErrors>({});
   const [saving, setSaving] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [dirty, setDirty] = useState(false);
   const firstFieldRef = useRef<HTMLInputElement>(null);
   const onModelsChangeRef = useRef(onModelsChange);
+  const requestSequence = useRef(0);
 
   useEffect(() => {
     onModelsChangeRef.current = onModelsChange;
   }, [onModelsChange]);
 
   const loadModels = useCallback(async () => {
+    const sequence = ++requestSequence.current;
     setLoading(true);
     setError("");
     try {
       const data = await apiRequest<AiModel[] | { models: AiModel[] }>("/api/models", { cache: "no-store" });
+      if (sequence !== requestSequence.current) return;
       const nextModels = Array.isArray(data) ? data : Array.isArray(data.models) ? data.models : [];
       setModels(nextModels);
       onModelsChangeRef.current?.(nextModels);
     } catch (requestError) {
+      if (sequence !== requestSequence.current) return;
       setError(requestError instanceof Error ? requestError.message : "模型列表加载失败，请重试。");
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadModels(), 0);
     return () => window.clearTimeout(timer);
-  }, [loadModels]);
+  }, [loadModels, refreshKey]);
 
   useEffect(() => {
     if (!success) return;
@@ -254,7 +259,11 @@ export default function ModelCenter({ className, onModelsChange }: ModelCenterPr
 
   async function deleteModel(model: AiModel) {
     if (!window.confirm(`确定删除模型“${model.name}”吗？该操作不会删除历史 Agent 运行记录。`)) return;
-    setDeletingId(model.id);
+    setDeletingIds((current) => {
+      const next = new Set(current);
+      next.add(model.id);
+      return next;
+    });
     setError("");
     try {
       await apiRequest<unknown>(`/api/models/${encodeURIComponent(model.id)}`, { method: "DELETE" });
@@ -263,7 +272,11 @@ export default function ModelCenter({ className, onModelsChange }: ModelCenterPr
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "模型删除失败，请重试。");
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(model.id);
+        return next;
+      });
     }
   }
 
@@ -313,7 +326,7 @@ export default function ModelCenter({ className, onModelsChange }: ModelCenterPr
         <div className={styles.modelGrid}>
           {models.map((model) => {
             const capabilities = getModelCapabilities(model);
-            const isDeleting = deletingId === model.id;
+            const isDeleting = deletingIds.has(model.id);
             return (
               <article key={model.id} className={joinClassNames(styles.modelCard, !model.enabled && styles.modelCardDisabled)}>
                 <div className={styles.cardTitle}>
@@ -353,7 +366,7 @@ export default function ModelCenter({ className, onModelsChange }: ModelCenterPr
             <form onSubmit={saveModel} noValidate>
               <header className={styles.dialogHeader}>
                 <div><h2 id="model-dialog-title">{editing ? "编辑模型" : "添加 AI 模型"}</h2><p>{editing ? "留空 API Key 即保留当前密钥。" : "配置完成后，所有项目都可以选择该模型。"}</p></div>
-                <button className={styles.iconButton} type="button" aria-label="关闭模型表单" onClick={closeForm}><X size={16} /></button>
+                <button className={styles.iconButton} type="button" aria-label="关闭模型表单" onClick={closeForm} disabled={saving}><X size={16} /></button>
               </header>
               <div className={styles.dialogBody}>
                 <div className={styles.formGrid}>

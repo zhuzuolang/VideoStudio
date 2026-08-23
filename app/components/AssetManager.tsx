@@ -31,6 +31,7 @@ type AssetManagerProps = {
   projectId: string;
   projectName?: string;
   className?: string;
+  refreshKey?: number;
   onAssetsChange?: (assets: ProjectAsset[]) => void;
 };
 
@@ -90,7 +91,7 @@ function AssetPreview({ asset }: { asset: ProjectAsset }) {
   );
 }
 
-export default function AssetManager({ projectId, projectName, className, onAssetsChange }: AssetManagerProps) {
+export default function AssetManager({ projectId, projectName, className, refreshKey, onAssetsChange }: AssetManagerProps) {
   const [assets, setAssets] = useState<ProjectAsset[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -103,9 +104,10 @@ export default function AssetManager({ projectId, projectName, className, onAsse
   const [file, setFile] = useState<File | null>(null);
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [dirty, setDirty] = useState(false);
   const requestSequence = useRef(0);
+  const previousRefreshKey = useRef(refreshKey);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const onAssetsChangeRef = useRef(onAssetsChange);
 
@@ -147,6 +149,13 @@ export default function AssetManager({ projectId, projectName, className, onAsse
     }, 0);
     return () => window.clearTimeout(timer);
   }, [loadAssets]);
+
+  useEffect(() => {
+    if (Object.is(previousRefreshKey.current, refreshKey)) return;
+    previousRefreshKey.current = refreshKey;
+    const timer = window.setTimeout(() => void loadAssets(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadAssets, refreshKey]);
 
   useEffect(() => {
     if (!success) return;
@@ -206,6 +215,18 @@ export default function AssetManager({ projectId, projectName, className, onAsse
     setForm((current) => ({ ...current, [key]: value }));
     setFormError("");
     setDirty(true);
+  }
+
+  function changeUploadMode(nextMode: UploadMode) {
+    if (nextMode === uploadMode) return;
+    setUploadMode(nextMode);
+    setFormError("");
+    setDirty(true);
+    if (nextMode === "file") {
+      setForm((current) => ({ ...current, sourceUrl: "", thumbnailUrl: "" }));
+    } else {
+      setFile(null);
+    }
   }
 
   function selectFile(nextFile: File | null) {
@@ -283,7 +304,11 @@ export default function AssetManager({ projectId, projectName, className, onAsse
 
   async function deleteAsset(asset: ProjectAsset) {
     if (!window.confirm(`确定删除资产“${asset.name}”吗？已关联的 Agent 分析记录仍会保留引用快照。`)) return;
-    setDeletingId(asset.id);
+    setDeletingIds((current) => {
+      const next = new Set(current);
+      next.add(asset.id);
+      return next;
+    });
     setError("");
     try {
       await apiRequest<unknown>(`/api/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(asset.id)}`, { method: "DELETE" });
@@ -292,7 +317,11 @@ export default function AssetManager({ projectId, projectName, className, onAsse
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "资产删除失败，请重试。");
     } finally {
-      setDeletingId(null);
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(asset.id);
+        return next;
+      });
     }
   }
 
@@ -343,7 +372,7 @@ export default function AssetManager({ projectId, projectName, className, onAsse
             <div className={styles.assetGrid}>
               {visibleAssets.map((asset) => {
                 const meta = ASSET_TYPE_META[asset.type] ?? ASSET_TYPE_META.other;
-                const isDeleting = deletingId === asset.id;
+                const isDeleting = deletingIds.has(asset.id);
                 return (
                   <article className={styles.assetCard} key={asset.id}>
                     <AssetPreview asset={asset} />
@@ -372,12 +401,12 @@ export default function AssetManager({ projectId, projectName, className, onAsse
             <form onSubmit={createAsset} noValidate>
               <header className={styles.dialogHeader}>
                 <div><h2 id="asset-dialog-title">新增项目资产</h2><p>将文件上传到项目存储，或登记可访问的外部地址。</p></div>
-                <button className={styles.iconButton} type="button" aria-label="关闭资产表单" onClick={closeUploader}><X size={16} /></button>
+                <button className={styles.iconButton} type="button" aria-label="关闭资产表单" onClick={closeUploader} disabled={saving}><X size={16} /></button>
               </header>
               <div className={styles.dialogBody}>
                 <div className={styles.uploadMode} role="group" aria-label="资产来源">
-                  <button type="button" aria-pressed={uploadMode === "file"} onClick={() => { setUploadMode("file"); setFormError(""); setDirty(true); }}><Upload size={15} /> 上传文件</button>
-                  <button type="button" aria-pressed={uploadMode === "url"} onClick={() => { setUploadMode("url"); setFormError(""); setDirty(true); }}><Link2 size={15} /> 外部 URL</button>
+                  <button type="button" aria-pressed={uploadMode === "file"} onClick={() => changeUploadMode("file")}><Upload size={15} /> 上传文件</button>
+                  <button type="button" aria-pressed={uploadMode === "url"} onClick={() => changeUploadMode("url")}><Link2 size={15} /> 外部 URL</button>
                 </div>
                 <div className={styles.formGrid}>
                   <div className={styles.field}>

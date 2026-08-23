@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   BookOpenText,
@@ -32,6 +32,8 @@ type AgentStudioProps = {
   projectName?: string;
   className?: string;
   initialGoal?: string;
+  initialRunId?: string | null;
+  refreshKey?: number;
   onOpenModels?: () => void;
   onRunComplete?: (run: AgentRun) => void;
 };
@@ -100,6 +102,8 @@ export default function AgentStudio({
   projectName,
   className,
   initialGoal = "",
+  initialRunId = null,
+  refreshKey,
   onOpenModels,
   onRunComplete,
 }: AgentStudioProps) {
@@ -120,10 +124,15 @@ export default function AgentStudio({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [formError, setFormError] = useState("");
-  const requestSequence = useRef(0);
+  const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
+  const workspaceRequestSequence = useRef(0);
+  const historyRequestSequence = useRef(0);
+  const runRequestSequence = useRef(0);
+  const projectIdRef = useRef(projectId);
 
   const eligibleModels = useMemo(() => models.filter((model) => model.enabled && model.hasApiKey), [models]);
   const selectedModel = useMemo(() => models.find((model) => model.id === modelId) ?? null, [modelId, models]);
+  const workspaceReady = loadedProjectId === projectId;
 
   const sortedRuns = useMemo(
     () => [...runs].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()),
@@ -136,28 +145,25 @@ export default function AgentStudio({
   );
 
   const loadWorkspace = useCallback(async () => {
-    const sequence = ++requestSequence.current;
-    if (!projectId) {
-      setModels([]);
-      setScripts([]);
-      setAssets([]);
-      setCharacters([]);
-      setRuns([]);
-      setActiveRun(null);
+    const requestedProjectId = projectId;
+    const sequence = ++workspaceRequestSequence.current;
+    if (!requestedProjectId) {
+      if (requestedProjectId !== projectIdRef.current || sequence !== workspaceRequestSequence.current) return;
+      setLoadedProjectId(requestedProjectId);
       setLoading(false);
-      setError("");
       return;
     }
 
     setLoading(true);
     setError("");
     try {
-      const data = await apiRequest<WorkspaceBootstrap>(`/api/bootstrap?projectId=${encodeURIComponent(projectId)}`, { cache: "no-store" });
-      if (sequence !== requestSequence.current) return;
+      const data = await apiRequest<WorkspaceBootstrap>(`/api/bootstrap?projectId=${encodeURIComponent(requestedProjectId)}`, { cache: "no-store" });
+      if (requestedProjectId !== projectIdRef.current || sequence !== workspaceRequestSequence.current) return;
       const nextModels = Array.isArray(data.models) ? data.models : [];
       const nextScripts = Array.isArray(data.scripts) ? data.scripts : [];
       const nextAssets = Array.isArray(data.assets) ? data.assets : [];
       const nextRuns = Array.isArray(data.agentRuns) ? data.agentRuns : [];
+      const initialRun = initialRunId ? nextRuns.find((run) => run.id === initialRunId) ?? null : null;
       setModels(nextModels);
       setScripts(nextScripts);
       setAssets(nextAssets);
@@ -165,47 +171,93 @@ export default function AgentStudio({
       setHasStory(Boolean(data.story));
       setEpisodeCount(Array.isArray(data.episodes) ? data.episodes.length : 0);
       setRuns(nextRuns);
-      setActiveRun(null);
+      setActiveRun(initialRun);
       const firstEligible = nextModels.find((model) => model.enabled && model.hasApiKey);
       setModelId(firstEligible?.id ?? "");
       setSources({ ...EMPTY_SOURCES, includeStory: Boolean(data.story) });
       setGoal(initialGoal);
       setSystemPrompt("");
       setFormError("");
+      setLoadedProjectId(requestedProjectId);
     } catch (requestError) {
-      if (sequence !== requestSequence.current) return;
+      if (requestedProjectId !== projectIdRef.current || sequence !== workspaceRequestSequence.current) return;
       setError(requestError instanceof Error ? requestError.message : "Agent 工作区加载失败，请重试。");
+      setLoadedProjectId(requestedProjectId);
     } finally {
-      if (sequence === requestSequence.current) setLoading(false);
+      if (requestedProjectId === projectIdRef.current && sequence === workspaceRequestSequence.current) setLoading(false);
     }
-  }, [initialGoal, projectId]);
+  }, [initialGoal, initialRunId, projectId]);
 
   const refreshRuns = useCallback(async (silent = false) => {
-    if (!projectId) return;
+    const requestedProjectId = projectId;
+    if (!requestedProjectId || requestedProjectId !== projectIdRef.current) return;
+    const sequence = ++historyRequestSequence.current;
     if (!silent) setRefreshingHistory(true);
     try {
-      const data = await apiRequest<AgentRun[] | { runs?: AgentRun[]; agentRuns?: AgentRun[] }>(`/api/projects/${encodeURIComponent(projectId)}/agent-runs`, { cache: "no-store" });
+      const data = await apiRequest<AgentRun[] | { runs?: AgentRun[]; agentRuns?: AgentRun[] }>(`/api/projects/${encodeURIComponent(requestedProjectId)}/agent-runs`, { cache: "no-store" });
+      if (requestedProjectId !== projectIdRef.current || sequence !== historyRequestSequence.current) return;
       const nextRuns = Array.isArray(data) ? data : Array.isArray(data.runs) ? data.runs : Array.isArray(data.agentRuns) ? data.agentRuns : [];
       setRuns(nextRuns);
       setActiveRun((current) => current ? nextRuns.find((run) => run.id === current.id) ?? current : current);
       setError("");
     } catch (requestError) {
+      if (requestedProjectId !== projectIdRef.current || sequence !== historyRequestSequence.current) return;
       if (!silent) setError(requestError instanceof Error ? requestError.message : "历史记录刷新失败，请重试。");
     } finally {
-      if (!silent) setRefreshingHistory(false);
+      if (requestedProjectId === projectIdRef.current && sequence === historyRequestSequence.current) setRefreshingHistory(false);
     }
+  }, [projectId]);
+
+  useLayoutEffect(() => {
+    projectIdRef.current = projectId;
+    workspaceRequestSequence.current += 1;
+    historyRequestSequence.current += 1;
+    runRequestSequence.current += 1;
+  }, [projectId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setModels([]);
+      setScripts([]);
+      setAssets([]);
+      setCharacters([]);
+      setHasStory(false);
+      setEpisodeCount(0);
+      setRuns([]);
+      setActiveRun(null);
+      setModelId("");
+      setSources(EMPTY_SOURCES);
+      setSystemPrompt("");
+      setError("");
+      setFormError("");
+      setRefreshingHistory(false);
+      setSubmitting(false);
+      setLoadedProjectId(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [projectId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadWorkspace(), 0);
     return () => window.clearTimeout(timer);
-  }, [loadWorkspace]);
+  }, [loadWorkspace, refreshKey]);
+
+  const hasPendingRuns = runs.some((run) => isPending(run));
 
   useEffect(() => {
-    if (!isPending(activeRun) || submitting) return;
-    const timer = window.setTimeout(() => void refreshRuns(true), 2200);
-    return () => window.clearTimeout(timer);
-  }, [activeRun, refreshingHistory, refreshRuns, submitting]);
+    if (!hasPendingRuns || !workspaceReady) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      await refreshRuns(true);
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 2200);
+    };
+    timer = window.setTimeout(() => void poll(), 2200);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [hasPendingRuns, refreshRuns, workspaceReady]);
 
   function setAllScripts(selected: boolean) {
     setSources((current) => ({ ...current, scriptIds: selected ? scripts.map((script) => script.id) : [] }));
@@ -243,6 +295,8 @@ export default function AgentStudio({
       return;
     }
 
+    const requestedProjectId = projectId;
+    const sequence = ++runRequestSequence.current;
     setSubmitting(true);
     setError("");
     const body: AgentRunInput = {
@@ -259,18 +313,20 @@ export default function AgentStudio({
     if (systemPrompt.trim()) body.systemPrompt = systemPrompt.trim();
 
     try {
-      const data = await apiRequest<AgentRun | { run: AgentRun }>(`/api/projects/${encodeURIComponent(projectId)}/agent-runs`, {
+      const data = await apiRequest<AgentRun | { run: AgentRun }>(`/api/projects/${encodeURIComponent(requestedProjectId)}/agent-runs`, {
         method: "POST",
         body: JSON.stringify(body),
       });
+      if (requestedProjectId !== projectIdRef.current || sequence !== runRequestSequence.current) return;
       const run = "run" in data ? data.run : data;
       setActiveRun(run);
       setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
       onRunComplete?.(run);
     } catch (requestError) {
+      if (requestedProjectId !== projectIdRef.current || sequence !== runRequestSequence.current) return;
       setFormError(requestError instanceof Error ? requestError.message : "Agent 运行失败，请重试。");
     } finally {
-      setSubmitting(false);
+      if (requestedProjectId === projectIdRef.current && sequence === runRequestSequence.current) setSubmitting(false);
     }
   }
 
@@ -284,14 +340,14 @@ export default function AgentStudio({
           <h2 id="agent-studio-title">AI 创作搭档{projectName ? ` · ${projectName}` : ""}</h2>
           <p>明确选择模型与项目素材后发起真实分析。Agent 只引用本次勾选的上下文，并保留运行与引用快照。</p>
         </div>
-        <span className={styles.runState}>{isPending(activeRun) || submitting ? <LoaderCircle className={styles.spinner} size={14} /> : <Bot size={14} />}{isPending(activeRun) || submitting ? "Agent 正在运行" : "等待创作任务"}</span>
+        <span className={styles.runState}>{isPending(workspaceReady ? activeRun : null) || submitting ? <LoaderCircle className={styles.spinner} size={14} /> : <Bot size={14} />}{isPending(workspaceReady ? activeRun : null) || submitting ? "Agent 正在运行" : "等待创作任务"}</span>
       </div>
 
-      {error && <div className={joinClassNames(styles.notice, styles.noticeError)} role="alert"><AlertCircle size={16} /><span>{error}</span></div>}
+      {workspaceReady && error && <div className={joinClassNames(styles.notice, styles.noticeError)} role="alert"><AlertCircle size={16} /><span>{error}</span></div>}
 
       {!projectId ? (
         <div className={styles.stateBox}><div><Bot size={27} /><h3>请先选择项目</h3><p>Agent 的剧本、人物、资产与运行历史均按项目隔离。</p></div></div>
-      ) : loading ? (
+      ) : loading || !workspaceReady ? (
         <div className={styles.stateBox} aria-live="polite"><div><LoaderCircle className={styles.spinner} size={25} /><h3>正在准备 Agent 工作区</h3><p>正在读取当前项目可用的模型、剧本和资产。</p></div></div>
       ) : error && models.length === 0 ? (
         <div className={styles.stateBox}><div><AlertCircle size={25} /><h3>暂时无法加载 Agent 工作区</h3><p>请检查网络或服务状态后重试。</p><button className={styles.secondaryButton} onClick={() => void loadWorkspace()}><RefreshCw size={14} /> 重新加载</button></div></div>
