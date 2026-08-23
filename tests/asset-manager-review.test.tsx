@@ -114,6 +114,36 @@ describe("AssetManager 审查项回归", () => {
     ).toHaveAttribute("aria-pressed", "true");
   });
 
+  test("资产刷新失败时保留已加载卡片并提供重试", async () => {
+    let assetLoads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/assets")) {
+          assetLoads += 1;
+          return assetLoads === 1
+            ? jsonResponse([makeAsset()])
+            : errorResponse("资产服务暂时不可用");
+        }
+        if (url.endsWith("/characters") || url === "/api/models")
+          return jsonResponse([]);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const view = render(<AssetManager projectId="project-1" refreshKey={0} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "雨夜参考图" }),
+    ).toBeVisible();
+    view.rerender(<AssetManager projectId="project-1" refreshKey={1} />);
+
+    expect(
+      await screen.findByRole("button", { name: "重试资产列表" }),
+    ).toBeVisible();
+    expect(screen.getByRole("heading", { name: "雨夜参考图" })).toBeVisible();
+  });
+
   test("编辑可显式清空 URL，保存期间锁定字段", async () => {
     const asset = makeAsset();
     let resolvePatch: ((response: Response) => void) | undefined;
@@ -198,13 +228,13 @@ describe("AssetManager 审查项回归", () => {
     expect(failedPreview).toHaveStyle({ display: "none" });
 
     view.rerender(<AssetManager projectId="project-1" refreshKey={1} />);
-    const recoveredPreview = await screen.findByAltText("雨夜参考图预览");
     await waitFor(() =>
-      expect(recoveredPreview).toHaveAttribute(
+      expect(screen.getByAltText("雨夜参考图预览")).toHaveAttribute(
         "src",
         "https://example.test/good.png",
       ),
     );
+    const recoveredPreview = screen.getByAltText("雨夜参考图预览");
     expect(recoveredPreview).not.toHaveStyle({ display: "none" });
 
     await user.click(

@@ -411,8 +411,7 @@ function ScriptsView({ projectId, episodes, scripts, onOpenAgent, onSaved }: { p
   const [message, setMessage] = useState("");
   const [form, setForm] = useState({ title: "", episodeId: "", bodyText: "" });
   const titleInputRef = useRef<HTMLInputElement>(null);
-  const hasDraftRef = useRef(false);
-  hasDraftRef.current = Boolean(form.title.trim() || form.episodeId || form.bodyText.trim());
+  const hasDraft = Boolean(form.title.trim() || form.episodeId || form.bodyText.trim());
   const effectiveSelectedId = scripts.some((item) => item.id === selectedId) ? selectedId : scripts[0]?.id ?? "";
   const script = scripts.find((item) => item.id === effectiveSelectedId) ?? scripts[0];
   const scenes = (script?.scenes ?? []) as SceneRecord[];
@@ -424,10 +423,10 @@ function ScriptsView({ projectId, episodes, scripts, onOpenAgent, onSaved }: { p
 
   const closeDialog = useCallback(() => {
     if (saving) return;
-    if (hasDraftRef.current && !window.confirm("放弃未保存的剧本草稿？")) return;
+    if (hasDraft && !window.confirm("放弃未保存的剧本草稿？")) return;
     setDialogOpen(false);
     resetForm();
-  }, [resetForm, saving]);
+  }, [hasDraft, resetForm, saving]);
 
   useEffect(() => {
     if (!dialogOpen) return;

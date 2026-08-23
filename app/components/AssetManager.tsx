@@ -145,7 +145,7 @@ function relationInputs(
 }
 function isImageModel(model: AiModel): boolean {
   const capabilities = getModelCapabilities(model).map((value) =>
-    value.toLowerCase(),
+    value.trim().toLowerCase(),
   );
   return (
     model.enabled &&
@@ -159,7 +159,7 @@ function isImageModel(model: AiModel): boolean {
         "图像生成",
       ].includes(value),
     ) ||
-      /seedream|dall-e|image generation|text-to-image|图片生成|图像生成/i.test(
+      /seedream|dall-e|image[-_ ]?(?:gen|generation)|text[-_ ]?to[-_ ]?image|图片生成|图像生成/i.test(
         `${model.name} ${model.modelId}`,
       ))
   );
@@ -368,7 +368,6 @@ export default function AssetManager({
       onAssetsChangeRef.current?.(nextAssets);
     } catch (reason) {
       if (sequence === requestSequence.current) {
-        setAssets([]);
         setError(
           reason instanceof Error ? reason.message : "资产加载失败，请重试。",
         );
@@ -704,7 +703,14 @@ export default function AssetManager({
           role="alert"
         >
           <AlertCircle size={16} />
-          {error}
+          <span>{error}</span>
+          <button
+            className={styles.textButton}
+            type="button"
+            onClick={() => void loadAssets()}
+          >
+            <RefreshCw size={13} /> 重试资产列表
+          </button>
         </div>
       )}
       {characterLoadError && (
