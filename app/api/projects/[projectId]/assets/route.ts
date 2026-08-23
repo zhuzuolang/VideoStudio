@@ -2,7 +2,7 @@ import { ApiError, created, errorResponse, id, jsonText, nowIso, ok, optionalStr
 import { inferAssetMediaType, parseAssetRelations, safeFilename, safeRemoteUrl, validateAssetCategory, validateAssetMediaType } from "@/lib/server/assets";
 import { apiContext, type RouteContext } from "@/lib/server/context";
 import { mediaBucket } from "@/lib/server/runtime";
-import { allRows, prepareAssetRelationStatements, requireOwnedProject, serializeAssetById } from "@/lib/server/store";
+import { prepareAssetRelationStatements, requireOwnedProject, serializeAssetById, serializeProjectAssets } from "@/lib/server/store";
 
 export const dynamic = "force-dynamic";
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -11,8 +11,7 @@ export async function GET(request: Request, context: RouteContext<{ projectId: s
   try {
     const { projectId } = await context.params; const { db, identity } = await apiContext(request);
     await requireOwnedProject(db, projectId, identity.userId);
-    const rows = await allRows(db.prepare(`SELECT id FROM assets WHERE project_id = ? ORDER BY updated_at DESC`).bind(projectId));
-    const assets = (await Promise.all(rows.map((row) => serializeAssetById(db, String(row.id))))).filter(Boolean);
+    const assets = await serializeProjectAssets(db, projectId);
     return ok({ assets });
   } catch (error) { return errorResponse(error); }
 }

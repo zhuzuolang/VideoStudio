@@ -859,6 +859,139 @@
   z-index: 0;
 }
 
+.generationCard {
+  border-color: color-mix(in srgb, var(--module-warning) 34%, var(--module-line));
+}
+
+.generationCardFailed {
+  border-color: color-mix(in srgb, var(--module-danger) 38%, var(--module-line));
+}
+
+.generationQueue {
+  display: grid;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--module-warning) 24%, var(--module-line));
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--module-warning) 4%, var(--module-paper));
+}
+
+.generationQueueHeader {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.generationQueueHeader h3 {
+  margin-top: 3px;
+  font-size: 13px;
+}
+
+.generationQueueHeader small {
+  max-width: 420px;
+  color: var(--module-muted);
+  font-size: 8px;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.generationPreview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 144px;
+  overflow: hidden;
+  color: var(--module-warning);
+  background:
+    radial-gradient(circle at 78% 22%, color-mix(in srgb, var(--module-warning) 25%, transparent), transparent 34%),
+    linear-gradient(135deg, #2f322e, #171814);
+}
+
+.generationCardFailed .generationPreview {
+  color: #ff8a77;
+  background:
+    radial-gradient(circle at 78% 22%, rgba(255, 91, 69, 0.24), transparent 34%),
+    linear-gradient(135deg, #332b2a, #181514);
+}
+
+.generationStatusRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.generationProgress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 11px;
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.generationProgress > div {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--module-soft);
+}
+
+.generationProgress i {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--module-accent), var(--module-warning));
+  transition: width 240ms ease;
+}
+
+.generationCardFailed .generationProgress i {
+  background: var(--module-danger);
+}
+
+.generationError {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 11px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--module-danger) 24%, var(--module-line));
+  border-radius: 8px;
+  color: var(--module-danger);
+  background: color-mix(in srgb, var(--module-danger) 6%, var(--module-paper));
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.generationError code {
+  color: var(--module-muted);
+  font-size: 7px;
+  word-break: break-all;
+}
+
+.generationPendingNote {
+  margin: 0 0 11px;
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--module-warning) 24%, var(--module-line));
+  border-radius: 8px;
+  color: var(--module-warning);
+  background: color-mix(in srgb, var(--module-warning) 7%, var(--module-paper));
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.generationActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
 .typeBadge {
   position: absolute;
   z-index: 3;
@@ -903,6 +1036,11 @@
 }
 
 .assetFoot time {
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.assetFoot small {
   color: var(--module-muted);
   font-size: 8px;
 }

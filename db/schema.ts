@@ -224,6 +224,47 @@ export const aiModels = sqliteTable(
   (table) => [index("idx_ai_models_owner_updated").on(table.ownerId, table.updatedAt)],
 );
 
+export const assetGenerationJobs = sqliteTable(
+  "asset_generation_jobs",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id").notNull(),
+    clientRequestId: text("client_request_id").notNull(),
+    modelId: text("model_id").references(() => aiModels.id, { onDelete: "set null" }),
+    modelName: text("model_name").notNull(),
+    name: text("name").notNull(),
+    category: text("category").notNull(),
+    prompt: text("prompt").notNull(),
+    size: text("size"),
+    aspectRatio: text("aspect_ratio"),
+    relationsJson: text("relations_json").notNull().default("[]"),
+    status: text("status").notNull().default("queued"),
+    phase: text("phase").notNull().default("queued"),
+    progress: integer("progress").notNull().default(0),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    retryable: integer("retryable", { mode: "boolean" }).notNull().default(true),
+    assetId: text("asset_id").references(() => assets.id, { onDelete: "set null" }),
+    storageKey: text("storage_key"),
+    dismissedAt: text("dismissed_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    startedAt: text("started_at"),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    uniqueIndex("uidx_asset_generation_client_request").on(table.projectId, table.ownerId, table.clientRequestId),
+    index("idx_asset_generation_project_updated").on(table.projectId, table.updatedAt),
+    index("idx_asset_generation_status_lease").on(table.status, table.leaseExpiresAt),
+  ],
+);
+
 export const agentRuns = sqliteTable(
   "agent_runs",
   {

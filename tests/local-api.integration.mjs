@@ -69,6 +69,50 @@ const createdModel = modelCreated.payload.data.model;
 assert(createdModel.hasApiKey === true, "short encrypted key should still report configured");
 assert(createdModel.apiKeyMasked === null, "short key must not be echoed in the mask");
 
+const imageModelCreated = await request("/api/models", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    name: "异步生图任务联调",
+    provider: "OpenAI-compatible",
+    modelId: "test-image-generation",
+    level: "test",
+    endpoint: "https://api.openai.com/v1",
+    apiKey: "test-image-key",
+    parameters: { capabilities: ["image-generation"] },
+  }),
+});
+assert(imageModelCreated.response.status === 201, `image model create: ${imageModelCreated.response.status}`);
+const idempotencyKey = `integration-generation-${Date.now()}`;
+const generationQueued = await request(`/api/projects/${projectTwo.id}/assets/generate`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+  body: JSON.stringify({
+    clientRequestId: idempotencyKey,
+    modelId: imageModelCreated.payload.data.model.id,
+    name: "异步任务占位卡",
+    category: "reference",
+    prompt: "只验证任务入队，不执行模型",
+    aspectRatio: "1:1",
+  }),
+});
+assert(generationQueued.response.status === 202, `generation queue: ${generationQueued.response.status} ${JSON.stringify(generationQueued.payload)}`);
+assert(generationQueued.payload.data.generation.status === "queued", "generation should be persisted as queued");
+const generationQueuedAgain = await request(`/api/projects/${projectTwo.id}/assets/generate`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+  body: JSON.stringify({
+    clientRequestId: idempotencyKey,
+    modelId: imageModelCreated.payload.data.model.id,
+    name: "异步任务占位卡",
+    category: "reference",
+    prompt: "只验证任务入队，不执行模型",
+  }),
+});
+assert(generationQueuedAgain.payload.data.generation.id === generationQueued.payload.data.generation.id, "idempotent generation request created a duplicate job");
+const generationList = await request(`/api/projects/${projectTwo.id}/assets/generate`);
+assert(generationList.payload.data.generations.some((item) => item.id === generationQueued.payload.data.generation.id), "queued generation was not recoverable from D1");
+
 const form = new FormData();
 form.set("file", new File([new Uint8Array(2048).fill(7)], "integration.bin", { type: "application/octet-stream" }));
 form.set("name", "接口联调资产");

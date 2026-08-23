@@ -165,6 +165,39 @@ const schemaStatements = [
     updated_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_ai_models_owner_updated ON ai_models(owner_id, updated_at)`,
+  `CREATE TABLE IF NOT EXISTS asset_generation_jobs (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL,
+    client_request_id TEXT NOT NULL,
+    model_id TEXT REFERENCES ai_models(id) ON DELETE SET NULL,
+    model_name TEXT NOT NULL,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    size TEXT,
+    aspect_ratio TEXT,
+    relations_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'queued',
+    phase TEXT NOT NULL DEFAULT 'queued',
+    progress INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT,
+    lease_expires_at TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    retryable INTEGER NOT NULL DEFAULT 1,
+    asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL,
+    storage_key TEXT,
+    dismissed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uidx_asset_generation_client_request ON asset_generation_jobs(project_id, owner_id, client_request_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_generation_project_updated ON asset_generation_jobs(project_id, updated_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_generation_status_lease ON asset_generation_jobs(status, lease_expires_at)`,
   `CREATE TABLE IF NOT EXISTS agent_runs (
     id TEXT PRIMARY KEY NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -398,6 +431,48 @@ export async function listAssetRelations(db: D1Database, projectId: string, asse
   return rows.filter((row) => row.targetName);
 }
 
+async function listProjectAssetRelations(db: D1Database, projectId: string): Promise<Record<string, unknown>[]> {
+  const rows = await allRows<Record<string, unknown>>(db.prepare(`SELECT r.source_asset_id AS ownerAssetId, r.id,
+    CASE WHEN r.target_asset_id IS NOT NULL THEN 'asset' ELSE 'character' END AS targetType,
+    COALESCE(r.target_asset_id, r.target_character_id) AS targetId,
+    COALESCE(a.name, c.name) AS targetName,
+    a.media_type AS targetMediaType, a.category AS targetCategory,
+    r.relation_type AS relationType, r.note, 'outgoing' AS direction
+    FROM asset_relations r
+    LEFT JOIN assets a ON a.id = r.target_asset_id AND a.project_id = r.project_id
+    LEFT JOIN characters c ON c.id = r.target_character_id AND c.project_id = r.project_id
+    WHERE r.project_id = ?
+    UNION ALL
+    SELECT r.target_asset_id AS ownerAssetId, r.id, 'asset' AS targetType,
+      r.source_asset_id AS targetId, source.name AS targetName,
+      source.media_type AS targetMediaType, source.category AS targetCategory,
+      r.relation_type AS relationType, r.note, 'incoming' AS direction
+    FROM asset_relations r
+    JOIN assets source ON source.id = r.source_asset_id AND source.project_id = r.project_id
+    WHERE r.project_id = ? AND r.target_asset_id IS NOT NULL
+    ORDER BY ownerAssetId, id`).bind(projectId, projectId));
+  return rows.filter((row) => row.ownerAssetId && row.targetName);
+}
+
+export async function serializeProjectAssets(
+  db: D1Database,
+  projectId: string,
+  existingRows?: Record<string, unknown>[],
+): Promise<Record<string, unknown>[]> {
+  const assetRows = existingRows ?? await allRows<Record<string, unknown>>(
+    db.prepare(`${assetSelect} WHERE project_id = ? ORDER BY updated_at DESC`).bind(projectId),
+  );
+  const relationRows = await listProjectAssetRelations(db, projectId);
+  const relationsByAsset = new Map<string, Record<string, unknown>[]>();
+  for (const relation of relationRows) {
+    const ownerAssetId = String(relation.ownerAssetId);
+    const serializedRelation = { ...relation };
+    delete serializedRelation.ownerAssetId;
+    relationsByAsset.set(ownerAssetId, [...(relationsByAsset.get(ownerAssetId) ?? []), serializedRelation]);
+  }
+  return assetRows.map((row) => serializeAsset(row, relationsByAsset.get(String(row.id)) ?? []));
+}
+
 export async function replaceAssetRelations(
   db: D1Database,
   projectId: string,
@@ -416,13 +491,8 @@ export async function prepareAssetRelationStatements(
   const statements: D1PreparedStatement[] = [
     db.prepare(`DELETE FROM asset_relations WHERE project_id = ? AND source_asset_id = ?`).bind(projectId, sourceAssetId),
   ];
+  await validateAssetRelationTargets(db, projectId, relations, sourceAssetId);
   for (const relation of relations) {
-    if (relation.targetType === "asset" && relation.targetId === sourceAssetId) {
-      throw new ApiError(400, "INVALID_ASSET_RELATION", "资产不能关联自身。 ");
-    }
-    const table = relation.targetType === "asset" ? "assets" : "characters";
-    const target = await db.prepare(`SELECT id FROM ${table} WHERE id = ? AND project_id = ?`).bind(relation.targetId, projectId).first();
-    if (!target) throw new ApiError(400, "INVALID_ASSET_RELATION", "关联目标不存在或不属于当前项目。 ");
     statements.push(db.prepare(`INSERT INTO asset_relations (
       id, project_id, source_asset_id, target_asset_id, target_character_id, relation_type, note, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(
@@ -433,6 +503,58 @@ export async function prepareAssetRelationStatements(
     ));
   }
   return statements;
+}
+
+export function prepareGeneratedAssetRelationStatements(
+  db: D1Database,
+  projectId: string,
+  sourceAssetId: string,
+  relations: AssetRelationInput[],
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`DELETE FROM asset_relations WHERE project_id = ? AND source_asset_id = ?`).bind(projectId, sourceAssetId),
+  ];
+  for (const relation of relations) {
+    const relationId = id("rel");
+    const relationType = relation.relationType?.trim() || "related";
+    const note = relation.note?.trim() || "";
+    if (relation.targetType === "asset") {
+      statements.push(db.prepare(`INSERT INTO asset_relations (
+        id, project_id, source_asset_id, target_asset_id, target_character_id, relation_type, note, created_at
+      ) SELECT ?, ?, ?, ?, NULL, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM assets WHERE id = ? AND project_id = ?)`).bind(
+        relationId, projectId, sourceAssetId, relation.targetId, relationType, note, nowIso(),
+        relation.targetId, projectId,
+      ));
+    } else {
+      statements.push(db.prepare(`INSERT INTO asset_relations (
+        id, project_id, source_asset_id, target_asset_id, target_character_id, relation_type, note, created_at
+      ) SELECT ?, ?, ?, NULL, ?, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM characters WHERE id = ? AND project_id = ?)`).bind(
+        relationId, projectId, sourceAssetId, relation.targetId, relationType, note, nowIso(),
+        relation.targetId, projectId,
+      ));
+    }
+  }
+  return statements;
+}
+
+export async function validateAssetRelationTargets(
+  db: D1Database,
+  projectId: string,
+  relations: AssetRelationInput[],
+  sourceAssetId?: string,
+): Promise<void> {
+  for (const relation of relations) {
+    if (sourceAssetId && relation.targetType === "asset" && relation.targetId === sourceAssetId) {
+      throw new ApiError(400, "INVALID_ASSET_RELATION", "资产不能关联自身。 ");
+    }
+    const table = relation.targetType === "asset" ? "assets" : "characters";
+    const target = await db.prepare(`SELECT id FROM ${table} WHERE id = ? AND project_id = ?`)
+      .bind(relation.targetId, projectId)
+      .first();
+    if (!target) throw new ApiError(400, "INVALID_ASSET_RELATION", "关联目标不存在或不属于当前项目。 ");
+  }
 }
 
 const assetSelect = `SELECT id, project_id AS projectId, name, media_type AS mediaType, category, description, mime_type AS mimeType,
@@ -530,7 +652,7 @@ export async function workspacePayload(
     episodes: episodeRows,
     characters: characterRows.map((row) => ({ ...row, relationships: parseJson(row.relationshipsJson, []), relationshipsJson: undefined })),
     scripts: scriptRows.map((script) => ({ ...script, scenes: scenesByScript.get(String(script.id)) ?? [] })),
-    assets: await Promise.all(assetRows.map(async (row) => serializeAsset(row, await listAssetRelations(db, activeProjectId, String(row.id))))),
+    assets: await serializeProjectAssets(db, activeProjectId, assetRows),
     models,
     agentRuns: agentRows.map((row) => serializeAgentRun(row, sourcesByRun.get(String(row.id)) ?? [])),
   };

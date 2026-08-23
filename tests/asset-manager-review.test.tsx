@@ -8,7 +8,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import AssetManager from "@/app/components/AssetManager";
-import type { AiModel, ProjectAsset } from "@/lib/platform-types";
+import type { AiModel, AssetGenerationJob, ProjectAsset } from "@/lib/platform-types";
 
 const NOW = "2026-08-23T00:00:00.000Z";
 
@@ -64,6 +64,36 @@ function makeModel(overrides: Partial<AiModel>): AiModel {
   };
 }
 
+function makeGenerationJob(overrides: Partial<AssetGenerationJob> = {}): AssetGenerationJob {
+  return {
+    id: "gen-1",
+    projectId: "project-1",
+    clientRequestId: "request-1",
+    modelId: "generation",
+    modelName: "正式生图模型",
+    name: "即时任务卡",
+    category: "character",
+    prompt: "电影感人物设定",
+    size: null,
+    aspectRatio: "1:1",
+    relations: [],
+    status: "queued",
+    phase: "queued",
+    progress: 0,
+    attemptCount: 0,
+    errorCode: null,
+    errorMessage: null,
+    retryable: true,
+    assetId: null,
+    canRun: true,
+    createdAt: NOW,
+    updatedAt: NOW,
+    startedAt: null,
+    completedAt: null,
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -85,6 +115,7 @@ describe("AssetManager 审查项回归", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
         if (url.endsWith("/assets"))
           return jsonResponse([makeAsset({ relations })]);
         if (url.endsWith("/characters")) return errorResponse("人物服务不可用");
@@ -120,6 +151,7 @@ describe("AssetManager 审查项回归", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
         if (url.endsWith("/assets")) {
           assetLoads += 1;
           return assetLoads === 1
@@ -155,6 +187,7 @@ describe("AssetManager 审查项回归", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
         if (init?.method === "PATCH") {
           patchBody = JSON.parse(String(init.body));
           return patchResponse;
@@ -210,6 +243,7 @@ describe("AssetManager 审查项回归", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
         if (init?.method === "DELETE") return deleteResponse;
         if (url.endsWith("/assets")) {
           assetLoads += 1;
@@ -260,6 +294,7 @@ describe("AssetManager 审查项回归", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
         if (url === "/api/models") return jsonResponse(models);
         return jsonResponse([]);
       }),
@@ -278,5 +313,180 @@ describe("AssetManager 审查项回归", () => {
     expect(
       within(select).getByRole("option", { name: "正式生图模型" }),
     ).toBeVisible();
+  });
+
+  test("AI 创建后立即关闭弹窗并显示持久任务卡，失败时展示服务端原因", async () => {
+    const model = makeModel({ id: "generation", name: "正式生图模型" });
+    let resolveRunner: ((response: Response) => void) | undefined;
+    const runnerResponse = new Promise<Response>((resolve) => {
+      resolveRunner = resolve;
+    });
+    let serverJob: AssetGenerationJob | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([model]);
+        if (url.endsWith("/characters") || url.endsWith("/assets")) return jsonResponse([]);
+        if (url.endsWith("/assets/generate") && init?.method === "POST") {
+          serverJob = {
+            id: "gen-1",
+            projectId: "project-1",
+            clientRequestId: String((JSON.parse(String(init.body)) as { clientRequestId: string }).clientRequestId),
+            modelId: model.id,
+            modelName: model.name,
+            name: "浪子基础建模",
+            category: "character",
+            prompt: "A Pose，漫画风格",
+            size: null,
+            aspectRatio: "1:1",
+            relations: [],
+            status: "queued",
+            phase: "queued",
+            progress: 0,
+            attemptCount: 0,
+            errorCode: null,
+            errorMessage: null,
+            retryable: true,
+            assetId: null,
+            canRun: true,
+            createdAt: NOW,
+            updatedAt: NOW,
+            startedAt: null,
+            completedAt: null,
+          };
+          return new Response(JSON.stringify({ data: { generation: serverJob } }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/assets/generate") && !init?.method) {
+          return jsonResponse({ generations: serverJob ? [serverJob] : [] });
+        }
+        if (url.endsWith("/assets/generate/gen-1") && init?.method === "POST") return runnerResponse;
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AssetManager projectId="project-1" />);
+
+    await user.click(await screen.findByRole("button", { name: "AI 创建资产" }));
+    await user.type(screen.getByRole("textbox", { name: "资产名称 *" }), "浪子基础建模");
+    await user.type(screen.getByRole("textbox", { name: "生成提示词 *" }), "A Pose，漫画风格");
+    await user.click(screen.getByRole("button", { name: "创建生成任务" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "AI 创建资产" })).toBeNull());
+    expect(await screen.findByRole("heading", { name: "浪子基础建模" })).toBeVisible();
+    expect(screen.getByText("生成中")).toBeVisible();
+
+    serverJob = {
+      ...(serverJob as unknown as AssetGenerationJob),
+      status: "failed",
+      phase: "failed",
+      progress: 15,
+      errorCode: "IMAGE_INVALID_REQUEST",
+      errorMessage: "模型不支持当前尺寸，请改用 1024x1024。",
+      retryable: false,
+      canRun: false,
+      attemptCount: 1,
+    };
+    resolveRunner?.(errorResponse("模型请求失败"));
+
+    expect(await screen.findByText("模型不支持当前尺寸，请改用 1024x1024。")).toBeVisible();
+    expect(screen.getByText("IMAGE_INVALID_REQUEST")).toBeVisible();
+    expect(screen.getByText("生成失败")).toBeVisible();
+  });
+
+  test("创建请求仍在等待时立即显示卡片，空列表刷新不会把卡片覆盖掉", async () => {
+    const model = makeModel({ id: "generation", name: "正式生图模型" });
+    let resolveEnqueue: ((response: Response) => void) | undefined;
+    const enqueueResponse = new Promise<Response>((resolve) => {
+      resolveEnqueue = resolve;
+    });
+    const runnerResponse = new Promise<Response>(() => undefined);
+    let generationGets = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([model]);
+        if (url.endsWith("/characters") || url.endsWith("/assets")) return jsonResponse([]);
+        if (url.endsWith("/assets/generate") && init?.method === "POST") return enqueueResponse;
+        if (url.endsWith("/assets/generate") && !init?.method) {
+          generationGets += 1;
+          return jsonResponse({ generations: [] });
+        }
+        if (url.includes("/assets/generate/gen-1") && init?.method === "POST") return runnerResponse;
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    const view = render(<AssetManager projectId="project-1" refreshKey={0} />);
+
+    await user.click(await screen.findByRole("button", { name: "AI 创建资产" }));
+    await user.type(screen.getByRole("textbox", { name: "资产名称 *" }), "即时任务卡");
+    await user.type(screen.getByRole("textbox", { name: "生成提示词 *" }), "电影感人物设定");
+    await user.click(screen.getByRole("button", { name: "创建生成任务" }));
+
+    expect(await screen.findByRole("heading", { name: "即时任务卡" })).toBeVisible();
+    expect(screen.getByText("正在创建任务")).toBeVisible();
+    view.rerender(<AssetManager projectId="project-1" refreshKey={1} />);
+    await waitFor(() => expect(generationGets).toBeGreaterThanOrEqual(2));
+    expect(screen.getByRole("heading", { name: "即时任务卡" })).toBeVisible();
+
+    const job = makeGenerationJob();
+    resolveEnqueue?.(new Response(JSON.stringify({ data: { generation: job } }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    }));
+    expect(await screen.findByText("生成中")).toBeVisible();
+  });
+
+  test("提交响应丢失时使用相同幂等标识确认，不会创建第二个任务", async () => {
+    const model = makeModel({ id: "generation", name: "正式生图模型" });
+    const runnerResponse = new Promise<Response>(() => undefined);
+    const idempotencyKeys: string[] = [];
+    const clientRequestIds: string[] = [];
+    let enqueueCalls = 0;
+    let serverJob: AssetGenerationJob | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([model]);
+        if (url.endsWith("/characters") || url.endsWith("/assets")) return jsonResponse([]);
+        if (url.endsWith("/assets/generate") && init?.method === "POST") {
+          enqueueCalls += 1;
+          const headers = new Headers(init.headers);
+          const body = JSON.parse(String(init.body)) as { clientRequestId: string };
+          idempotencyKeys.push(headers.get("Idempotency-Key") ?? "");
+          clientRequestIds.push(body.clientRequestId);
+          if (enqueueCalls === 1) throw new TypeError("response lost after commit");
+          serverJob = makeGenerationJob({ clientRequestId: body.clientRequestId });
+          return new Response(JSON.stringify({ data: { generation: serverJob } }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/assets/generate") && !init?.method) {
+          return jsonResponse({ generations: serverJob ? [serverJob] : [] });
+        }
+        if (url.includes("/assets/generate/gen-1") && init?.method === "POST") return runnerResponse;
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AssetManager projectId="project-1" />);
+
+    await user.click(await screen.findByRole("button", { name: "AI 创建资产" }));
+    await user.type(screen.getByRole("textbox", { name: "资产名称 *" }), "幂等任务");
+    await user.type(screen.getByRole("textbox", { name: "生成提示词 *" }), "保持同一请求标识");
+    await user.click(screen.getByRole("button", { name: "创建生成任务" }));
+
+    await waitFor(() => expect(enqueueCalls).toBe(2));
+    expect(idempotencyKeys[0]).toBeTruthy();
+    expect(new Set(idempotencyKeys).size).toBe(1);
+    expect(new Set(clientRequestIds).size).toBe(1);
+    expect(await screen.findByRole("heading", { name: "即时任务卡" })).toBeVisible();
   });
 });

@@ -32,6 +32,7 @@ import {
   ASSET_CATEGORIES,
   ASSET_MEDIA_TYPES,
   type AiModel,
+  type AssetGenerationJob,
   type AssetCategory,
   type AssetMediaType,
   type AssetRelationInput,
@@ -40,6 +41,7 @@ import {
 } from "@/lib/platform-types";
 import {
   apiRequest,
+  PlatformApiError,
   getModelCapabilities,
   formatCompactDate,
   joinClassNames,
@@ -165,6 +167,26 @@ function isImageModel(model: AiModel): boolean {
   );
 }
 
+function isDefinitiveGenerationSubmissionFailure(reason: unknown): boolean {
+  return reason instanceof PlatformApiError && new Set([
+    "VALIDATION_ERROR",
+    "INVALID_JSON",
+    "INVALID_BODY",
+    "INVALID_GENERATION_REQUEST",
+    "INVALID_IDEMPOTENCY_KEY",
+    "INVALID_ASSET_CATEGORY",
+    "INVALID_ASSET_RELATION",
+    "INVALID_ASSET_RELATIONS",
+    "AUTH_REQUIRED",
+    "PROJECT_NOT_FOUND",
+    "MODEL_NOT_FOUND",
+    "MODEL_DISABLED",
+    "MODEL_API_KEY_MISSING",
+    "MODEL_IMAGE_UNSUPPORTED",
+    "GENERATION_REQUEST_ALREADY_USED",
+  ]).has(reason.code);
+}
+
 function AssetPreview({ asset }: { asset: ProjectAsset }) {
   const Icon = MEDIA_META[asset.mediaType]?.icon ?? Package;
   const imageSource =
@@ -188,6 +210,120 @@ function AssetPreview({ asset }: { asset: ProjectAsset }) {
         <Icon size={11} /> {MEDIA_META[asset.mediaType].label}
       </span>
     </div>
+  );
+}
+
+const GENERATION_PHASE_LABEL: Record<AssetGenerationJob["phase"], string> = {
+  queued: "等待生成服务",
+  model: "模型正在生成图片",
+  storage: "正在写入媒体存储",
+  finalize: "正在建立资产记录",
+  completed: "图片已生成并入库",
+  failed: "生成流程已停止",
+};
+
+function generationStatusLabel(status: AssetGenerationJob["status"]): string {
+  if (status === "submitting") return "正在创建任务";
+  if (status === "queued") return "排队中";
+  if (status === "running") return "生成中";
+  if (status === "succeeded") return "生成成功";
+  return "生成失败";
+}
+
+function assetStatusLabel(asset: ProjectAsset): string {
+  if (asset.status === "ready" && asset.metadata?.source === "ai-generation") return "生成成功";
+  if (asset.status === "ready") return "已就绪";
+  if (asset.status === "planned") return "规划中";
+  return asset.status;
+}
+
+function GenerationCard({
+  generation,
+  processing,
+  onRetry,
+  onDismiss,
+}: {
+  generation: AssetGenerationJob;
+  processing: boolean;
+  onRetry: (generation: AssetGenerationJob) => void;
+  onDismiss: (generation: AssetGenerationJob) => void;
+}) {
+  const failed = generation.status === "failed";
+  const active = generation.status === "submitting" || generation.status === "queued" || generation.status === "running";
+  const submissionUnconfirmed = generation.status === "submitting"
+    && generation.errorCode === "GENERATION_SUBMISSION_UNCONFIRMED";
+  return (
+    <article
+      className={joinClassNames(styles.assetCard, styles.generationCard, failed && styles.generationCardFailed)}
+    >
+      <div className={styles.generationPreview}>
+        {failed ? <AlertCircle size={30} /> : active ? <LoaderCircle className={styles.spinner} size={30} /> : <CheckCircle2 size={30} />}
+        <span className={styles.typeBadge}><ImageIcon size={11} /> AI 图片</span>
+      </div>
+      <div className={styles.assetBody}>
+        <h3>{generation.name}</h3>
+        <div className={styles.assetDimensions}>
+          <span className={styles.sourceBadge}>图片</span>
+          <span className={styles.levelBadge}>{CATEGORY_META[generation.category].label}</span>
+        </div>
+        <p>{generation.prompt}</p>
+        <div className={styles.generationStatusRow}>
+          <span role={failed ? undefined : "status"} aria-live={failed ? undefined : "polite"} className={joinClassNames(
+            styles.statusBadge,
+            active && styles.statusBadgeWarning,
+            failed && styles.statusBadgeError,
+          )}>
+            {generationStatusLabel(generation.status)}
+          </span>
+          <span>{GENERATION_PHASE_LABEL[generation.phase]}</span>
+        </div>
+        <div
+          className={styles.generationProgress}
+          role="progressbar"
+          aria-label="生成流程进度"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={generation.progress}
+        >
+          <div><i style={{ width: `${generation.progress}%` }} /></div>
+          <span>{generation.progress}%</span>
+        </div>
+        {active && generation.errorMessage && (
+          <div className={styles.generationPendingNote} role="status">
+            {generation.errorMessage}
+          </div>
+        )}
+        {failed && generation.errorMessage && (
+          <div className={styles.generationError} role="alert">
+            <b>{generation.errorMessage}</b>
+            {generation.errorCode && <code>{generation.errorCode}</code>}
+          </div>
+        )}
+        <div className={styles.assetFoot}>
+          <time>{formatCompactDate(generation.updatedAt || generation.createdAt)}</time>
+          {failed || submissionUnconfirmed ? (
+            <div className={styles.generationActions}>
+              {(generation.retryable || submissionUnconfirmed) && (
+                <button
+                  type="button"
+                  className={styles.textButton}
+                  onClick={() => onRetry(generation)}
+                  disabled={processing}
+                >
+                  {processing ? <LoaderCircle className={styles.spinner} size={12} /> : <RefreshCw size={12} />}
+                  {submissionUnconfirmed ? "重新确认任务" : "重试生成"}
+                </button>
+              )}
+              <button type="button" className={styles.textButton} onClick={() => onDismiss(generation)} disabled={processing}>
+                <X size={12} /> 移除记录
+              </button>
+            </div>
+          ) : (
+            <small>第 {Math.max(1, generation.attemptCount)} 次尝试</small>
+          )}
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -263,6 +399,7 @@ export default function AssetManager({
   onAssetsChange,
 }: AssetManagerProps) {
   const [assets, setAssets] = useState<ProjectAsset[]>([]);
+  const [generations, setGenerations] = useState<AssetGenerationJob[]>([]);
   const [characters, setCharacters] = useState<CharacterOption[]>([]);
   const [models, setModels] = useState<AiModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -271,6 +408,7 @@ export default function AssetManager({
   const [formError, setFormError] = useState("");
   const [characterLoadError, setCharacterLoadError] = useState("");
   const [modelLoadError, setModelLoadError] = useState("");
+  const [generationLoadError, setGenerationLoadError] = useState("");
   const [search, setSearch] = useState("");
   const [mediaFilter, setMediaFilter] = useState<"all" | AssetMediaType>("all");
   const [categoryFilter, setCategoryFilter] = useState<"all" | AssetCategory>(
@@ -287,14 +425,21 @@ export default function AssetManager({
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [dirty, setDirty] = useState(false);
   const requestSequence = useRef(0);
+  const generationRequestSequence = useRef(0);
   const characterRequestSequence = useRef(0);
   const modelRequestSequence = useRef(0);
   const previousRefreshKey = useRef(refreshKey);
+  const activeProjectRef = useRef(projectId);
+  const processingGenerationIds = useRef<Set<string>>(new Set());
+  const dismissingGenerationIds = useRef<Set<string>>(new Set());
   const nameInputRef = useRef<HTMLInputElement>(null);
   const onAssetsChangeRef = useRef(onAssetsChange);
   useEffect(() => {
     onAssetsChangeRef.current = onAssetsChange;
   }, [onAssetsChange]);
+  useEffect(() => {
+    activeProjectRef.current = projectId;
+  }, [projectId]);
 
   const loadCharacters = useCallback(async () => {
     const sequence = ++characterRequestSequence.current;
@@ -345,15 +490,15 @@ export default function AssetManager({
     }
   }, [projectId]);
 
-  const loadAssets = useCallback(async () => {
+  const loadAssets = useCallback(async (silent = false) => {
     const sequence = ++requestSequence.current;
     if (!projectId) {
       setAssets([]);
       setLoading(false);
       return;
     }
-    setLoading(true);
-    setError("");
+    if (!silent) setLoading(true);
+    if (!silent) setError("");
     try {
       const assetData = await apiRequest<
         ProjectAsset[] | { assets: ProjectAsset[] }
@@ -373,9 +518,65 @@ export default function AssetManager({
         );
       }
     } finally {
-      if (sequence === requestSequence.current) setLoading(false);
+      if (!silent && sequence === requestSequence.current) setLoading(false);
     }
   }, [projectId]);
+
+  const loadGenerations = useCallback(async (silent = false) => {
+    const sequence = ++generationRequestSequence.current;
+    if (!projectId) {
+      setGenerations([]);
+      setGenerationLoadError("");
+      return;
+    }
+    if (!silent) setGenerationLoadError("");
+    try {
+      const data = await apiRequest<{ generations: AssetGenerationJob[] }>(
+        `/api/projects/${encodeURIComponent(projectId)}/assets/generate`,
+        { cache: "no-store" },
+      );
+      if (sequence !== generationRequestSequence.current || activeProjectRef.current !== projectId) return;
+      const serverGenerations = (data.generations ?? []).filter(
+        (generation) => !dismissingGenerationIds.current.has(generation.id),
+      );
+      setGenerations((current) => {
+        const confirmedRequestIds = new Set(serverGenerations.map((generation) => generation.clientRequestId));
+        const localPending = current.filter((generation) =>
+          generation.id.startsWith("local:") && !confirmedRequestIds.has(generation.clientRequestId),
+        );
+        return [...localPending, ...serverGenerations];
+      });
+      setGenerationLoadError("");
+    } catch (reason) {
+      if (sequence !== generationRequestSequence.current || activeProjectRef.current !== projectId) return;
+      setGenerationLoadError(reason instanceof Error ? reason.message : "生成任务状态加载失败。");
+    }
+  }, [projectId]);
+
+  const runGeneration = useCallback(async (generationId: string, retry = false) => {
+    const requestId = `${projectId}:${generationId}`;
+    if (processingGenerationIds.current.has(requestId)) return;
+    processingGenerationIds.current.add(requestId);
+    if (activeProjectRef.current === projectId) {
+      setGenerations((current) => current.map((generation) => generation.id === generationId
+        ? { ...generation, status: "running", phase: "model", progress: Math.max(15, generation.progress), errorCode: null, errorMessage: null, canRun: false }
+        : generation));
+    }
+    try {
+      await apiRequest(`/api/projects/${encodeURIComponent(projectId)}/assets/generate/${encodeURIComponent(generationId)}`, {
+        method: "POST",
+        body: JSON.stringify({ retry }),
+      });
+    } catch {
+      // The runner persists its safe error on the job. Refreshing below makes the card
+      // authoritative even when the long-running HTTP response itself was interrupted.
+    } finally {
+      processingGenerationIds.current.delete(requestId);
+      if (activeProjectRef.current === projectId) {
+        await Promise.all([loadGenerations(true), loadAssets(true)]);
+      }
+    }
+  }, [loadAssets, loadGenerations, projectId]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setSearch("");
@@ -384,12 +585,17 @@ export default function AssetManager({
       setDialog(null);
       setCharacters([]);
       setModels([]);
+      setGenerations([]);
+      setGenerationLoadError("");
+      processingGenerationIds.current.clear();
+      dismissingGenerationIds.current.clear();
       void loadCharacters();
       void loadModels();
       void loadAssets();
+      void loadGenerations();
     }, 0);
     return () => clearTimeout(timer);
-  }, [loadAssets, loadCharacters, loadModels]);
+  }, [loadAssets, loadCharacters, loadGenerations, loadModels]);
   useEffect(() => {
     if (Object.is(previousRefreshKey.current, refreshKey)) return;
     previousRefreshKey.current = refreshKey;
@@ -397,9 +603,34 @@ export default function AssetManager({
       void loadCharacters();
       void loadModels();
       void loadAssets();
+      void loadGenerations();
     }, 0);
     return () => clearTimeout(timer);
-  }, [loadAssets, loadCharacters, loadModels, refreshKey]);
+  }, [loadAssets, loadCharacters, loadGenerations, loadModels, refreshKey]);
+  useEffect(() => {
+    for (const generation of generations) {
+      if (generation.canRun && (generation.status === "queued" || generation.status === "running")) {
+        void runGeneration(generation.id);
+      }
+    }
+  }, [generations, runGeneration]);
+  const hasActiveGenerations = generations.some((generation) =>
+    generation.status === "submitting" || generation.status === "queued" || generation.status === "running",
+  );
+  useEffect(() => {
+    if (!hasActiveGenerations || !projectId) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      await Promise.all([loadGenerations(true), loadAssets(true)]);
+      if (!stopped) timer = window.setTimeout(poll, document.hidden ? 6_000 : 2_500);
+    };
+    timer = window.setTimeout(poll, 1_200);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [hasActiveGenerations, loadAssets, loadGenerations, projectId]);
   useEffect(() => {
     if (!success) return;
     const timer = window.setTimeout(() => setSuccess(""), 3200);
@@ -437,6 +668,18 @@ export default function AssetManager({
             .includes(needle)),
     );
   }, [assets, mediaFilter, categoryFilter, search]);
+  const generationCards = useMemo(() => {
+    const candidates = generations.filter((generation) => !(
+      generation.status === "succeeded"
+      && generation.assetId
+      && assets.some((asset) => asset.id === generation.assetId)
+    ));
+    const active = candidates.filter((generation) =>
+      generation.status === "submitting" || generation.status === "queued" || generation.status === "running",
+    );
+    const history = candidates.filter((generation) => !active.includes(generation)).slice(0, 12);
+    return [...active, ...history];
+  }, [assets, generations]);
   const selectableAssets = (currentId?: string) =>
     assets.filter((asset) => asset.id !== currentId);
 
@@ -612,31 +855,170 @@ export default function AssetManager({
     if (!generateForm.modelId) return setFormError("请选择已配置的图像模型。");
     if (!generateForm.name.trim() || !generateForm.prompt.trim())
       return setFormError("请填写资产名称与提示词。");
+    const snapshot = {
+      ...generateForm,
+      name: generateForm.name.trim(),
+      prompt: generateForm.prompt.trim(),
+      size: generateForm.size.trim(),
+    };
+    const clientRequestId = crypto.randomUUID();
+    const submissionProjectId = projectId;
+    const now = new Date().toISOString();
+    const optimistic: AssetGenerationJob = {
+      id: `local:${clientRequestId}`,
+      projectId,
+      clientRequestId,
+      modelId: snapshot.modelId,
+      modelName: eligibleModels.find((model) => model.id === snapshot.modelId)?.name ?? "图像模型",
+      name: snapshot.name,
+      category: snapshot.category,
+      prompt: snapshot.prompt,
+      size: snapshot.size || null,
+      aspectRatio: snapshot.aspectRatio || null,
+      relations: relationInputs(snapshot),
+      status: "submitting",
+      phase: "queued",
+      progress: 0,
+      attemptCount: 0,
+      errorCode: null,
+      errorMessage: null,
+      retryable: true,
+      assetId: null,
+      canRun: false,
+      createdAt: now,
+      updatedAt: now,
+      startedAt: null,
+      completedAt: null,
+    };
+    setGenerations((current) => [optimistic, ...current]);
+    setDialog(null);
+    setDirty(false);
+    setMediaFilter("all");
+    setCategoryFilter("all");
     setSaving(true);
     setFormError("");
+    const enqueue = () => apiRequest<{ generation: AssetGenerationJob }>(
+      `/api/projects/${encodeURIComponent(submissionProjectId)}/assets/generate`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": clientRequestId },
+        body: JSON.stringify({
+          ...snapshot,
+          clientRequestId,
+          size: snapshot.size || undefined,
+          relations: relationInputs(snapshot),
+        }),
+      },
+    );
     try {
-      await apiRequest(
-        `/api/projects/${encodeURIComponent(projectId)}/assets/generate`,
+      let data: { generation: AssetGenerationJob };
+      try {
+        data = await enqueue();
+      } catch (firstReason) {
+        const definitive = isDefinitiveGenerationSubmissionFailure(firstReason);
+        if (definitive) throw firstReason;
+        // A response can be lost after D1 committed the job. Retrying with the same key
+        // is safe and recovers the already-created task instead of creating a duplicate.
+        data = await enqueue();
+      }
+      if (activeProjectRef.current === submissionProjectId) {
+        setGenerations((current) => [
+          data.generation,
+          ...current.filter((generation) => generation.clientRequestId !== clientRequestId),
+        ]);
+        setSuccess(`AI 资产“${snapshot.name}”已进入生成队列。`);
+      }
+      void runGeneration(data.generation.id);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "无法创建 AI 资产生成任务。";
+      const code = reason instanceof PlatformApiError ? reason.code : "GENERATION_JOB_CREATE_FAILED";
+      const definitive = isDefinitiveGenerationSubmissionFailure(reason);
+      if (activeProjectRef.current === submissionProjectId) {
+        setGenerations((current) => current.map((generation) => generation.clientRequestId === clientRequestId
+          ? definitive
+            ? { ...generation, status: "failed", phase: "failed", errorCode: code, errorMessage: message,
+                retryable: false, updatedAt: new Date().toISOString() }
+            : { ...generation, status: "submitting", phase: "queued", errorCode: "GENERATION_SUBMISSION_UNCONFIRMED",
+                errorMessage: "网络中断，正在用同一请求标识确认任务是否已创建。请勿重复提交。",
+                retryable: true, updatedAt: new Date().toISOString() }
+          : generation));
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function confirmUncertainGeneration(generation: AssetGenerationJob) {
+    if (!generation.id.startsWith("local:") || !generation.modelId) return;
+    const submissionProjectId = generation.projectId;
+    setGenerations((current) => current.map((item) => item.id === generation.id
+      ? { ...item, errorMessage: "正在使用原请求标识确认任务，请稍候。", updatedAt: new Date().toISOString() }
+      : item));
+    try {
+      const data = await apiRequest<{ generation: AssetGenerationJob }>(
+        `/api/projects/${encodeURIComponent(submissionProjectId)}/assets/generate`,
         {
           method: "POST",
+          headers: { "Idempotency-Key": generation.clientRequestId },
           body: JSON.stringify({
-            ...generateForm,
-            name: generateForm.name.trim(),
-            prompt: generateForm.prompt.trim(),
-            size: generateForm.size || undefined,
-            relations: relationInputs(generateForm),
+            clientRequestId: generation.clientRequestId,
+            modelId: generation.modelId,
+            name: generation.name,
+            category: generation.category,
+            prompt: generation.prompt,
+            size: generation.size || undefined,
+            aspectRatio: generation.aspectRatio || undefined,
+            relations: generation.relations,
           }),
         },
       );
-      setDialog(null);
-      setSuccess(`AI 资产“${generateForm.name.trim()}”已生成。`);
-      await loadAssets();
+      if (activeProjectRef.current !== submissionProjectId) return;
+      setGenerations((current) => [
+        data.generation,
+        ...current.filter((item) => item.clientRequestId !== generation.clientRequestId),
+      ]);
+      void runGeneration(data.generation.id);
     } catch (reason) {
-      setFormError(
-        reason instanceof Error ? reason.message : "AI 资产生成失败。",
+      const definitive = isDefinitiveGenerationSubmissionFailure(reason);
+      if (activeProjectRef.current !== submissionProjectId) return;
+      setGenerations((current) => current.map((item) => item.id === generation.id
+        ? definitive
+          ? { ...item, status: "failed", phase: "failed", retryable: false,
+              errorCode: reason instanceof PlatformApiError ? reason.code : "GENERATION_JOB_CREATE_FAILED",
+              errorMessage: reason instanceof Error ? reason.message : "无法确认图片生成任务。",
+              updatedAt: new Date().toISOString() }
+          : { ...item, errorMessage: "仍未收到服务器确认；可以再次安全确认，或移除这条本地记录。",
+              updatedAt: new Date().toISOString() }
+        : item));
+    }
+  }
+  function retryGeneration(generation: AssetGenerationJob) {
+    if (generation.id.startsWith("local:")) {
+      void confirmUncertainGeneration(generation);
+      return;
+    }
+    if (!generation.retryable) return;
+    void runGeneration(generation.id, true);
+  }
+  async function dismissGeneration(generation: AssetGenerationJob) {
+    generationRequestSequence.current += 1;
+    dismissingGenerationIds.current.add(generation.id);
+    setGenerations((current) => current.filter((item) => item.id !== generation.id));
+    if (generation.id.startsWith("local:")) {
+      dismissingGenerationIds.current.delete(generation.id);
+      return;
+    }
+    try {
+      await apiRequest(
+        `/api/projects/${encodeURIComponent(projectId)}/assets/generate/${encodeURIComponent(generation.id)}`,
+        { method: "DELETE" },
       );
-    } finally {
-      setSaving(false);
+      await loadGenerations(true);
+      dismissingGenerationIds.current.delete(generation.id);
+    } catch (reason) {
+      dismissingGenerationIds.current.delete(generation.id);
+      setError(reason instanceof Error ? reason.message : "生成任务记录移除失败。");
+      await loadGenerations(true);
     }
   }
   async function deleteAsset(asset: ProjectAsset) {
@@ -745,6 +1127,22 @@ export default function AssetManager({
           </button>
         </div>
       )}
+      {generationLoadError && (
+        <div
+          className={joinClassNames(styles.notice, styles.noticeError)}
+          role="alert"
+        >
+          <AlertCircle size={16} />
+          <span>生成任务状态暂时无法更新：{generationLoadError}</span>
+          <button
+            className={styles.textButton}
+            type="button"
+            onClick={() => void loadGenerations()}
+          >
+            <RefreshCw size={13} /> 重试状态同步
+          </button>
+        </div>
+      )}
       {success && (
         <div
           className={joinClassNames(styles.notice, styles.noticeSuccess)}
@@ -764,6 +1162,28 @@ export default function AssetManager({
         </div>
       ) : (
         <>
+          {generationCards.length > 0 && (
+            <section className={styles.generationQueue} aria-labelledby="asset-generation-queue-title">
+              <div className={styles.generationQueueHeader}>
+                <div>
+                  <span className={styles.eyebrow}>AI GENERATION QUEUE</span>
+                  <h3 id="asset-generation-queue-title">AI 生成队列</h3>
+                </div>
+                <small>任务状态独立于下方资产筛选；中断后再次进入会自动恢复。</small>
+              </div>
+              <div className={styles.assetGrid}>
+                {generationCards.map((generation) => (
+                  <GenerationCard
+                    key={generation.id}
+                    generation={generation}
+                    processing={generation.status === "running"}
+                    onRetry={retryGeneration}
+                    onDismiss={(generation) => void dismissGeneration(generation)}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
           <div className={styles.assetFilters}>
             <div className={styles.searchWrap}>
               <Search size={14} />
@@ -852,7 +1272,7 @@ export default function AssetManager({
             <div className={styles.stateBox}>
               <div>
                 <Upload size={27} />
-                <h3>当前项目还没有资产</h3>
+                <h3>{generationCards.length ? "当前项目还没有已入库资产" : "当前项目还没有资产"}</h3>
                 <p>
                   上传文件、登记外部
                   URL，或使用已配置的图像模型创建首个生产资产。
@@ -939,7 +1359,7 @@ export default function AssetManager({
                       </div>
                     )}
                     <div className={styles.assetFoot}>
-                      <span className={styles.statusBadge}>{asset.status}</span>
+                      <span className={styles.statusBadge}>{assetStatusLabel(asset)}</span>
                       <time>
                         {formatCompactDate(asset.updatedAt || asset.createdAt)}
                       </time>
@@ -1172,7 +1592,7 @@ export default function AssetManager({
               <header className={styles.dialogHeader}>
                 <div>
                   <h2 id="generate-asset-title">AI 创建资产</h2>
-                  <p>生成成功后会自动下载到项目媒体存储并建立资产记录。</p>
+                  <p>提交后会立即建立任务卡片；页面中断时任务会保留，再次进入资产中心后自动恢复。</p>
                 </div>
                 <button
                   className={styles.iconButton}
@@ -1316,7 +1736,7 @@ export default function AssetManager({
                   ) : (
                     <Sparkles size={14} />
                   )}
-                  生成并入库
+                  创建生成任务
                 </button>
               </footer>
             </form>

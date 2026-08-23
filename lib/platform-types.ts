@@ -251,6 +251,49 @@ export type StageAgentActionResult = {
   entity: Record<string, unknown> | null;
 };
 
+export type AssetGenerationStatus =
+  | "submitting"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed";
+
+export type AssetGenerationPhase =
+  | "queued"
+  | "model"
+  | "storage"
+  | "finalize"
+  | "completed"
+  | "failed";
+
+export type AssetGenerationJob = {
+  id: string;
+  projectId: string;
+  clientRequestId: string;
+  modelId: string | null;
+  modelName: string;
+  name: string;
+  category: AssetCategory;
+  prompt: string;
+  size: string | null;
+  aspectRatio: string | null;
+  relations: AssetRelationInput[];
+  status: AssetGenerationStatus;
+  phase: AssetGenerationPhase;
+  progress: number;
+  attemptCount: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  retryable: boolean;
+  assetId: string | null;
+  canRun: boolean;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  dismissedAt?: string | null;
+};
+
 export type StageAgentPlanResponse = {
   run: AgentRun;
   reply: string;
