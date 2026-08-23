@@ -208,6 +208,61 @@ export type AgentRunInput = {
   sources?: AgentSourceSelection;
 };
 
+export const STAGE_AGENT_STAGES = [
+  "story",
+  "characters",
+  "scripts",
+  "breakdown",
+  "assets",
+  "shots",
+] as const;
+
+export type StageAgentStage = (typeof STAGE_AGENT_STAGES)[number];
+
+export const STAGE_AGENT_ACTION_TYPES = [
+  "update_story",
+  "create_character",
+  "create_script",
+  "create_scene",
+  "create_asset",
+  "create_storyboard_asset",
+] as const;
+
+export type StageAgentActionType = (typeof STAGE_AGENT_ACTION_TYPES)[number];
+
+export type StageAgentAction = {
+  type: StageAgentActionType;
+  label: string;
+  payload: Record<string, unknown>;
+};
+
+export type StageAgentHistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type StageAgentActionResult = {
+  index: number;
+  type: StageAgentActionType;
+  status: "completed";
+  entityType: "story" | "character" | "script" | "scene" | "asset";
+  entityId: string;
+  message: string;
+  entity: Record<string, unknown> | null;
+};
+
+export type StageAgentPlanResponse = {
+  run: AgentRun;
+  reply: string;
+  actions: StageAgentAction[];
+};
+
+export type StageAgentExecuteResponse = {
+  message: string;
+  actions: StageAgentAction[];
+  results: StageAgentActionResult[];
+};
+
 export type WorkspaceBootstrap = {
   workspace: {
     userId: string;

@@ -41,6 +41,7 @@ import {
 import AgentStudio from "./components/AgentStudio";
 import AssetManager from "./components/AssetManager";
 import ModelCenter from "./components/ModelCenter";
+import StageAgentPanel, { type StageAgentStage } from "./components/StageAgentPanel";
 import { apiRequest } from "./components/platform-client";
 import type {
   AgentRun,
@@ -159,6 +160,15 @@ const productionNav: NavItem[] = [
 ];
 
 const globalNav: NavItem[] = [{ id: "models", label: "AI 模型中心", icon: Cpu, global: true }];
+
+const stageAgentByView: Partial<Record<ViewId, StageAgentStage>> = {
+  story: "story",
+  characters: "characters",
+  scripts: "scripts",
+  breakdown: "breakdown",
+  assets: "assets",
+  shots: "shots",
+};
 
 const viewCopy: Record<ViewId, { kicker: string; title: string; description: string }> = {
   overview: { kicker: "PROJECT CONTROL", title: "项目制片驾驶舱", description: "当前项目的内容、资产和 Agent 记录全部来自持久化数据库。" },
@@ -617,6 +627,7 @@ export default function Home() {
   const currentCopy = viewCopy[activeView];
   const project = data?.project ?? null;
   const userInitial = data?.workspace.displayName?.slice(0, 1) || "影";
+  const stageAgentStage = stageAgentByView[activeView];
 
   const searchResults = useMemo<SearchResult[]>(() => {
     const needle = search.trim().toLocaleLowerCase("zh-CN");
@@ -708,9 +719,10 @@ export default function Home() {
 
       <div className="app-stage">
         <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="打开项目导航" onClick={() => setMobileNavOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>{activeView === "models" ? "跨项目" : project?.name || "项目"}</span><ChevronRight size={13} /><b>{currentCopy.title}</b></div></div><div className="topbar-center" onFocus={() => setSearchOpen(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSearchOpen(false); }}><Search size={15} /><input ref={searchInputRef} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" value={search} onChange={(event) => { setSearch(event.target.value); setSearchOpen(true); }} aria-label="搜索项目内容" aria-controls="workspace-search-results" aria-expanded={searchOpen && Boolean(search.trim())} placeholder="搜索人物、剧本、资产或 Agent 记录" /><kbd>⌘ K</kbd>{searchOpen && search.trim() && <div id="workspace-search-results" className="search-results" role="listbox" aria-label="搜索结果">{searchResults.length > 0 ? searchResults.map((result) => <button type="button" role="option" aria-selected="false" key={result.id} onClick={() => openSearchResult(result)}><span><b>{result.title}</b><small>{result.detail}</small></span><ChevronRight size={14} /></button>) : <div className="search-empty" role="status">当前项目没有匹配内容</div>}</div>}</div><div className="topbar-right"><span className="database-pill"><Database size={12} /> {refreshing ? "正在同步" : "数据已持久化"}</span><button className="icon-button" aria-label={refreshing ? "正在刷新数据" : "刷新数据"} onClick={() => void loadWorkspace(workspaceTargetProjectId.current ?? data?.activeProjectId ?? undefined, true)} disabled={loading || refreshing || switchingProject}>{refreshing ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}</button><div className="notification-control"><button className="icon-button" type="button" aria-label="查看通知" aria-expanded={notificationsOpen} aria-controls="notification-panel" onClick={() => { setNotificationsOpen((current) => !current); setUserMenuOpen(false); }}><Bell size={16} /></button>{notificationsOpen && <div id="notification-panel" className="shell-popover notification-popover" role="dialog" aria-label="通知"><div><b>工作区状态</b><button type="button" className="popover-close" aria-label="关闭通知" onClick={() => setNotificationsOpen(false)}><X size={14} /></button></div><p>{error ? `最近一次同步失败：${error}` : `当前项目有 ${data?.agentRuns.length ?? 0} 条 Agent 记录、${data?.assets.length ?? 0} 项资产。`}</p><small>{refreshing ? "正在获取最新数据…" : "暂无其他未读通知"}</small></div>}</div></div></header>
+        <div className={`workspace-layout ${stageAgentStage ? "" : "assistant-hidden"}`}>
         <main className="main-workspace full-width-workspace">
           {loading ? <LoadingWorkspace /> : error && !data ? <div className="platform-state error-state"><AlertCircle size={24} /><div><b>无法连接后端</b><span>{error}</span><button className="quiet-button" onClick={() => void loadWorkspace()}><RefreshCw size={14} /> 重试</button></div></div> : data && project ? <>
-            <div className="page-heading"><div><span className="page-kicker">{currentCopy.kicker}</span><div className="title-row"><h1>{currentCopy.title}</h1><span className="version-badge">{activeView === "models" ? "跨项目通用" : project.name}</span></div><p>{currentCopy.description}</p></div><div className="heading-actions">{activeView !== "agent" && activeView !== "models" && <button className="quiet-button" onClick={() => navigate("agent")}><Bot size={15} /> 交给 Agent</button>}{activeView !== "models" && activeView !== "assets" && <button className="primary-button" onClick={() => navigate("assets")}><Plus size={15} /> 添加资产</button>}</div></div>
+            <div className="page-heading"><div><span className="page-kicker">{currentCopy.kicker}</span><div className="title-row"><h1>{currentCopy.title}</h1><span className="version-badge">{activeView === "models" ? "跨项目通用" : project.name}</span></div><p>{currentCopy.description}</p></div><div className="heading-actions">{stageAgentStage ? <button className="quiet-button stage-agent-focus" onClick={() => document.getElementById("stage-agent-input")?.focus()}><Bot size={15} /> 使用本页 Agent</button> : activeView !== "agent" && activeView !== "models" && <button className="quiet-button" onClick={() => navigate("agent")}><Bot size={15} /> 交给 Agent</button>}{activeView !== "models" && activeView !== "assets" && <button className="primary-button" onClick={() => navigate("assets")}><Plus size={15} /> 添加资产</button>}</div></div>
             {error && <div className="workspace-alert"><AlertCircle size={15} />{error}<button onClick={() => setError("")}><X size={14} /></button></div>}
             {activeView === "overview" && <OverviewView data={data} navigate={navigate} onOpenRun={openAgentRun} />}
             {activeView === "story" && <StoryView key={`${project.id}-${String((data.story as StoryRecord | null)?.updatedAt ?? "new")}`} projectId={project.id} story={data.story as StoryRecord | null} episodes={data.episodes as EpisodeRecord[]} onSaved={async () => { await loadWorkspace(project.id, true); }} />}
@@ -724,6 +736,18 @@ export default function Home() {
             {activeView === "models" && <ModelCenter refreshKey={refreshKey} onModelsChange={(models: AiModel[]) => setData((current) => current ? { ...current, models } : current)} />}
           </> : null}
         </main>
+        {data && project && stageAgentStage && <StageAgentPanel
+          key={`${project.id}-${stageAgentStage}`}
+          projectId={project.id}
+          projectName={project.name}
+          stage={stageAgentStage}
+          models={data.models}
+          runs={data.agentRuns}
+          onOpenModels={() => navigate("models")}
+          onRunRecorded={(run) => setData((current) => current?.project?.id === project.id && run.projectId === project.id ? { ...current, agentRuns: [run, ...current.agentRuns.filter((item) => item.id !== run.id)] } : current)}
+          onExecuted={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("项目数据刷新失败，请使用顶栏刷新按钮重试。"); }}
+        />}
+        </div>
       </div>
       {newProjectOpen && <NewProjectDialog onClose={() => setNewProjectOpen(false)} onCreated={async (projectId) => { workspaceTargetProjectId.current = projectId; await loadWorkspace(projectId, true); }} />}
     </div>

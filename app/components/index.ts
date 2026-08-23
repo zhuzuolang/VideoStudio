@@ -6,3 +6,6 @@ export type { AssetManagerProps } from "./AssetManager";
 
 export { default as AgentStudio } from "./AgentStudio";
 export type { AgentStudioProps } from "./AgentStudio";
+
+export { default as StageAgentPanel } from "./StageAgentPanel";
+export type { StageAgentAction, StageAgentPanelProps, StageAgentStage } from "./StageAgentPanel";
