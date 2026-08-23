@@ -25,6 +25,57 @@ describe("资产双维分类", () => {
 });
 
 describe("资产关系项目隔离与持久化", () => {
+  test("复合关系查询显式声明排序列，兼容 SQLite compound SELECT", async () => {
+    let capturedSql = "";
+    const db = {
+      prepare(sql: string) {
+        capturedSql = sql;
+        return {
+          bind() { return this; },
+          async all() { return { results: [] }; },
+        };
+      },
+    } as unknown as D1Database;
+    const { listAssetRelations } = await import("@/lib/server/store");
+
+    await expect(listAssetRelations(db, "project-1", "asset-1")).resolves.toEqual([]);
+    expect(capturedSql).toMatch(/SELECT r\.id AS id,/);
+    expect(capturedSql).toMatch(/UNION ALL\s+SELECT r\.id AS id,/);
+    expect(capturedSql).toMatch(/ORDER BY id/);
+  });
+
+  test("关联 enrichment 异常时保留资产主体，避免阻断工作台", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const assetRow = {
+      id: "asset-1",
+      projectId: "project-1",
+      name: "角色图",
+      mediaType: "image",
+      category: "character",
+      description: "",
+      metadataJson: "{}",
+      storageKey: null,
+      status: "ready",
+      createdAt: "2026-08-23T00:00:00.000Z",
+      updatedAt: "2026-08-23T00:00:00.000Z",
+    };
+    const db = {
+      prepare() {
+        return {
+          bind() { return this; },
+          async all() { throw new Error("relation query unavailable"); },
+        };
+      },
+    } as unknown as D1Database;
+    const { serializeProjectAssets } = await import("@/lib/server/store");
+
+    await expect(serializeProjectAssets(db, "project-1", [assetRow])).resolves.toEqual([
+      expect.objectContaining({ id: "asset-1", name: "角色图", relations: [] }),
+    ]);
+    expect(errorLog).toHaveBeenCalledWith("Project asset relation enrichment failed", expect.objectContaining({ projectId: "project-1" }));
+    errorLog.mockRestore();
+  });
+
   test("只为当前项目中的目标生成批处理写入", async () => {
     const batched: Array<{ sql: string; values: unknown[] }> = [];
     const db = {

@@ -407,11 +407,17 @@ export function serializeModel(row: Record<string, unknown>): Record<string, unk
 
 export async function serializeAssetById(db: D1Database, assetId: string): Promise<Record<string, unknown> | null> {
   const row = await db.prepare(`${assetSelect} WHERE id = ?`).bind(assetId).first<Record<string, unknown>>();
-  return row ? serializeAsset(row, await listAssetRelations(db, String(row.projectId), assetId)) : null;
+  if (!row) return null;
+  try {
+    return serializeAsset(row, await listAssetRelations(db, String(row.projectId), assetId));
+  } catch (error) {
+    console.error("Asset relation enrichment failed", { projectId: row.projectId, assetId, error });
+    return serializeAsset(row, []);
+  }
 }
 
 export async function listAssetRelations(db: D1Database, projectId: string, assetId: string): Promise<Record<string, unknown>[]> {
-  const rows = await allRows<Record<string, unknown>>(db.prepare(`SELECT r.id,
+  const rows = await allRows<Record<string, unknown>>(db.prepare(`SELECT r.id AS id,
     CASE WHEN r.target_asset_id IS NOT NULL THEN 'asset' ELSE 'character' END AS targetType,
     COALESCE(r.target_asset_id, r.target_character_id) AS targetId,
     COALESCE(a.name, c.name) AS targetName,
@@ -422,7 +428,7 @@ export async function listAssetRelations(db: D1Database, projectId: string, asse
     LEFT JOIN characters c ON c.id = r.target_character_id AND c.project_id = r.project_id
     WHERE r.project_id = ? AND r.source_asset_id = ?
     UNION ALL
-    SELECT r.id, 'asset' AS targetType, r.source_asset_id AS targetId, source.name AS targetName,
+    SELECT r.id AS id, 'asset' AS targetType, r.source_asset_id AS targetId, source.name AS targetName,
       source.media_type AS targetMediaType, source.category AS targetCategory,
       r.relation_type AS relationType, r.note, 'incoming' AS direction
     FROM asset_relations r JOIN assets source ON source.id = r.source_asset_id AND source.project_id = r.project_id
@@ -432,7 +438,7 @@ export async function listAssetRelations(db: D1Database, projectId: string, asse
 }
 
 async function listProjectAssetRelations(db: D1Database, projectId: string): Promise<Record<string, unknown>[]> {
-  const rows = await allRows<Record<string, unknown>>(db.prepare(`SELECT r.source_asset_id AS ownerAssetId, r.id,
+  const rows = await allRows<Record<string, unknown>>(db.prepare(`SELECT r.source_asset_id AS ownerAssetId, r.id AS id,
     CASE WHEN r.target_asset_id IS NOT NULL THEN 'asset' ELSE 'character' END AS targetType,
     COALESCE(r.target_asset_id, r.target_character_id) AS targetId,
     COALESCE(a.name, c.name) AS targetName,
@@ -443,7 +449,7 @@ async function listProjectAssetRelations(db: D1Database, projectId: string): Pro
     LEFT JOIN characters c ON c.id = r.target_character_id AND c.project_id = r.project_id
     WHERE r.project_id = ?
     UNION ALL
-    SELECT r.target_asset_id AS ownerAssetId, r.id, 'asset' AS targetType,
+    SELECT r.target_asset_id AS ownerAssetId, r.id AS id, 'asset' AS targetType,
       r.source_asset_id AS targetId, source.name AS targetName,
       source.media_type AS targetMediaType, source.category AS targetCategory,
       r.relation_type AS relationType, r.note, 'incoming' AS direction
@@ -462,7 +468,13 @@ export async function serializeProjectAssets(
   const assetRows = existingRows ?? await allRows<Record<string, unknown>>(
     db.prepare(`${assetSelect} WHERE project_id = ? ORDER BY updated_at DESC`).bind(projectId),
   );
-  const relationRows = await listProjectAssetRelations(db, projectId);
+  let relationRows: Record<string, unknown>[];
+  try {
+    relationRows = await listProjectAssetRelations(db, projectId);
+  } catch (error) {
+    console.error("Project asset relation enrichment failed", { projectId, error });
+    return assetRows.map((row) => serializeAsset(row, []));
+  }
   const relationsByAsset = new Map<string, Record<string, unknown>[]>();
   for (const relation of relationRows) {
     const ownerAssetId = String(relation.ownerAssetId);
