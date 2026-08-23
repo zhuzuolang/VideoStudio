@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { access, readFile, stat } from "node:fs/promises";
+import { register } from "node:module";
 import test from "node:test";
+
+register("./cloudflare-loader.mjs", import.meta.url);
 
 const projectRoot = new URL("../", import.meta.url);
 
@@ -30,17 +33,20 @@ test("server-renders the FrameFlow production workspace", async () => {
 
   const html = await response.text();
   assert.match(html, /影序 FrameFlow/);
-  assert.match(html, /故事圣经/);
-  assert.match(html, /雾港来信/);
-  assert.match(html, /AI 创作搭档/);
+  assert.match(html, /故事设计/);
+  assert.match(html, /AI 创作 Agent/);
+  assert.match(html, /AI 模型中心/);
+  assert.match(html, /正在连接项目数据库/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
 test("ships product metadata and removes starter preview assets", async () => {
-  const [page, layout, packageJson, ogFile] = await Promise.all([
+  const [page, layout, packageJson, schema, agentRoute, ogFile] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/projects/[projectId]/agent-runs/route.ts", import.meta.url), "utf8"),
     stat(new URL("../public/og.png", import.meta.url)),
   ]);
 
@@ -49,6 +55,11 @@ test("ships product metadata and removes starter preview assets", async () => {
   assert.match(page, /剧本工作台/);
   assert.match(page, /生产拆解/);
   assert.match(page, /分镜预演/);
+  assert.match(page, /\/api\/bootstrap/);
+  assert.match(schema, /aiModels/);
+  assert.match(schema, /agentRuns/);
+  assert.match(agentRoute, /callConfiguredModel/);
+  assert.match(agentRoute, /collectAgentSources/);
   assert.match(layout, /og\.png/);
   assert.match(layout, /summary_large_image/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton|starter/);
