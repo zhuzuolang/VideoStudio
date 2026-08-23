@@ -52,26 +52,56 @@ export type AiModelInput = {
   clearApiKey?: boolean;
 };
 
-export const ASSET_TYPES = [
+export const ASSET_MEDIA_TYPES = [
   "image",
   "video",
   "audio",
   "model3d",
   "document",
+  "other",
+] as const;
+
+export type AssetMediaType = (typeof ASSET_MEDIA_TYPES)[number];
+
+export const ASSET_CATEGORIES = [
   "character",
   "costume",
   "prop",
   "scene",
+  "environment",
+  "vehicle",
+  "storyboard",
+  "reference",
   "other",
 ] as const;
 
-export type AssetType = (typeof ASSET_TYPES)[number];
+export type AssetCategory = (typeof ASSET_CATEGORIES)[number];
+
+export type AssetRelation = {
+  id: string;
+  targetType: "asset" | "character";
+  targetId: string;
+  targetName: string;
+  targetMediaType: AssetMediaType | null;
+  targetCategory: AssetCategory | null;
+  relationType: string;
+  note: string;
+  direction: "outgoing" | "incoming";
+};
+
+export type AssetRelationInput = {
+  targetType: "asset" | "character";
+  targetId: string;
+  relationType?: string;
+  note?: string;
+};
 
 export type ProjectAsset = {
   id: string;
   projectId: string;
   name: string;
-  type: AssetType;
+  mediaType: AssetMediaType;
+  category: AssetCategory;
   description: string | null;
   mimeType?: string | null;
   sizeBytes?: number | null;
@@ -81,18 +111,23 @@ export type ProjectAsset = {
   thumbnailUrl: string | null;
   status: string;
   metadata: Record<string, unknown> | null;
+  relations: AssetRelation[];
   createdAt: string;
   updatedAt: string;
 };
 
 export type ProjectAssetInput = {
   name: string;
-  type: AssetType;
+  mediaType: AssetMediaType;
+  category: AssetCategory;
   description?: string;
   sourceUrl?: string;
   thumbnailUrl?: string;
   metadata?: Record<string, unknown>;
   status?: string;
+  relations?: AssetRelationInput[];
+  relatedAssetIds?: string[];
+  relatedCharacterIds?: string[];
 };
 
 export type Project = {

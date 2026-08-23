@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   AlertCircle,
   Bot,
   CheckCircle2,
@@ -16,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import type { AiModel, AiModelInput } from "@/lib/platform-types";
-import { apiRequest, getModelCapabilities, joinClassNames } from "./platform-client";
+import { apiRequest, getModelCapabilities, isRecord, joinClassNames, PlatformApiError } from "./platform-client";
 import styles from "./PlatformModules.module.css";
 
 type ModelCenterProps = {
@@ -39,6 +40,14 @@ type ModelForm = {
 };
 
 type ModelFormErrors = Partial<Record<keyof ModelForm, string>>;
+
+type ModelTestResult = {
+  status: "success" | "failed";
+  type: "text" | "image" | "unknown";
+  latencyMs: number;
+  summary: string;
+  previewUrl?: string;
+};
 
 const EMPTY_FORM: ModelForm = {
   name: "",
@@ -89,12 +98,17 @@ function validateUrl(value: string): boolean {
 }
 
 function ModelAvatar({ model }: { model: AiModel }) {
+  const [failedIconVersion, setFailedIconVersion] = useState<string | null>(null);
+  const iconUrl = model.iconUrl ?? null;
+  const iconVersion = `${iconUrl ?? ""}:${model.updatedAt ?? ""}`;
+  const showIcon = Boolean(iconUrl && failedIconVersion !== iconVersion);
+
   return (
     <div className={styles.modelIcon} aria-hidden="true">
       <Bot size={20} />
-      {model.iconUrl && (
+      {showIcon && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={model.iconUrl} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />
+        <img src={iconUrl!} alt="" onError={() => setFailedIconVersion(iconVersion)} />
       )}
     </div>
   );
@@ -110,16 +124,22 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
   const [formErrors, setFormErrors] = useState<ModelFormErrors>({});
   const [saving, setSaving] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [testingIds, setTestingIds] = useState<Set<string>>(() => new Set());
+  const [testResults, setTestResults] = useState<Record<string, ModelTestResult>>({});
   const [dirty, setDirty] = useState(false);
   const firstFieldRef = useRef<HTMLInputElement>(null);
   const onModelsChangeRef = useRef(onModelsChange);
   const requestSequence = useRef(0);
+  const testGeneration = useRef(0);
 
   useEffect(() => {
     onModelsChangeRef.current = onModelsChange;
   }, [onModelsChange]);
 
   const loadModels = useCallback(async () => {
+    testGeneration.current += 1;
+    setTestResults({});
+    setTestingIds(new Set<string>());
     const sequence = ++requestSequence.current;
     setLoading(true);
     setError("");
@@ -280,6 +300,46 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
     }
   }
 
+  async function testModel(model: AiModel) {
+    const startedAt = Date.now();
+    const generation = testGeneration.current;
+    setTestingIds((current) => {
+      const next = new Set(current);
+      next.add(model.id);
+      return next;
+    });
+    setTestResults((current) => {
+      const next = { ...current };
+      delete next[model.id];
+      return next;
+    });
+    try {
+      const result = await apiRequest<Omit<ModelTestResult, "status"> & { status: "success" }>(`/api/models/${encodeURIComponent(model.id)}/test`, { method: "POST" });
+      if (generation !== testGeneration.current) return;
+      setTestResults((current) => ({ ...current, [model.id]: result }));
+    } catch (requestError) {
+      if (generation !== testGeneration.current) return;
+      const details = requestError instanceof PlatformApiError && isRecord(requestError.details) ? requestError.details : null;
+      setTestResults((current) => ({
+        ...current,
+        [model.id]: {
+          status: "failed",
+          type: details?.type === "text" || details?.type === "image" ? details.type : "unknown",
+          latencyMs: typeof details?.latencyMs === "number" ? details.latencyMs : Date.now() - startedAt,
+          summary: requestError instanceof Error ? requestError.message : "模型连接测试失败，请重试。",
+        },
+      }));
+    } finally {
+      if (generation === testGeneration.current) {
+        setTestingIds((current) => {
+          const next = new Set(current);
+          next.delete(model.id);
+          return next;
+        });
+      }
+    }
+  }
+
   return (
     <section className={joinClassNames(styles.moduleRoot, styles.moduleStack, className)} aria-labelledby="model-center-title">
       <div className={styles.toolbar}>
@@ -327,6 +387,8 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
           {models.map((model) => {
             const capabilities = getModelCapabilities(model);
             const isDeleting = deletingIds.has(model.id);
+            const isTesting = testingIds.has(model.id);
+            const testResult = testResults[model.id];
             return (
               <article key={model.id} className={joinClassNames(styles.modelCard, !model.enabled && styles.modelCardDisabled)}>
                 <div className={styles.cardTitle}>
@@ -347,11 +409,27 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
                   <span className={styles.levelBadge}>{model.level}</span>
                   {capabilities.length > 0 ? capabilities.map((capability) => <span className={styles.capability} key={capability}>{capability}</span>) : <span className={styles.capability}>未标注能力</span>}
                 </div>
+                <div
+                  className={joinClassNames(styles.modelTestResult, !testResult && !isTesting && styles.modelTestIdle, testResult?.status === "success" && styles.modelTestSuccess, testResult?.status === "failed" && styles.modelTestError)}
+                  role={isTesting || testResult?.status === "success" ? "status" : testResult?.status === "failed" ? "alert" : undefined}
+                  aria-live="polite"
+                >
+                  {isTesting ? <><div><LoaderCircle className={styles.spinner} size={13} /><b>正在测试</b></div><p>正在向模型服务发送最小连通性请求…</p></> : testResult ? <>
+                    <div>
+                      {testResult.status === "success" ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}
+                      <b>{testResult.status === "success" ? "连接成功" : "连接失败"}</b>
+                      <span>{testResult.type === "image" ? "图像" : testResult.type === "text" ? "文本" : "模型"} · {testResult.latencyMs} ms</span>
+                    </div>
+                    <p>{testResult.summary}</p>
+                    {testResult.previewUrl && <small>已收到安全的 HTTPS 图像预览地址，本次测试未写入资产库。</small>}
+                  </> : <><div><Activity size={13} /><b>尚未测试</b></div><p>运行一次最小请求，验证地址、密钥与模型响应。</p></>}
+                </div>
                 <div className={styles.cardActions}>
                   <span title={model.endpoint}>{model.endpoint}</span>
                   <div className={styles.inlineActions}>
-                    <button className={styles.iconButton} type="button" aria-label={`编辑模型 ${model.name}`} onClick={() => openEdit(model)} disabled={isDeleting}><Pencil size={14} /></button>
-                    <button className={styles.iconButton} type="button" aria-label={`删除模型 ${model.name}`} onClick={() => void deleteModel(model)} disabled={isDeleting}>{isDeleting ? <LoaderCircle className={styles.spinner} size={14} /> : <Trash2 size={14} />}</button>
+                    <button className={styles.testButton} type="button" aria-label={`测试模型 ${model.name}`} onClick={() => void testModel(model)} disabled={isDeleting || isTesting}>{isTesting ? <LoaderCircle className={styles.spinner} size={13} /> : <Activity size={13} />}{isTesting ? "测试中" : "测试"}</button>
+                    <button className={styles.iconButton} type="button" aria-label={`编辑模型 ${model.name}`} onClick={() => openEdit(model)} disabled={isDeleting || isTesting}><Pencil size={14} /></button>
+                    <button className={styles.iconButton} type="button" aria-label={`删除模型 ${model.name}`} onClick={() => void deleteModel(model)} disabled={isDeleting || isTesting}>{isDeleting ? <LoaderCircle className={styles.spinner} size={14} /> : <Trash2 size={14} />}</button>
                   </div>
                 </div>
               </article>
@@ -363,7 +441,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
       {editing !== undefined && (
         <div className={styles.dialogBackdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeForm(); }}>
           <div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="model-dialog-title">
-            <form onSubmit={saveModel} noValidate>
+            <form onSubmit={saveModel} noValidate aria-busy={saving}>
               <header className={styles.dialogHeader}>
                 <div><h2 id="model-dialog-title">{editing ? "编辑模型" : "添加 AI 模型"}</h2><p>{editing ? "留空 API Key 即保留当前密钥。" : "配置完成后，所有项目都可以选择该模型。"}</p></div>
                 <button className={styles.iconButton} type="button" aria-label="关闭模型表单" onClick={closeForm} disabled={saving}><X size={16} /></button>
@@ -372,50 +450,50 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
                 <div className={styles.formGrid}>
                   <div className={styles.field}>
                     <label htmlFor="model-name">显示名称<span className={styles.requiredMark}>*</span></label>
-                    <input ref={firstFieldRef} id="model-name" value={form.name} onChange={(event) => updateForm("name", event.target.value)} aria-invalid={Boolean(formErrors.name)} aria-describedby={formErrors.name ? "model-name-error" : undefined} placeholder="例如：剧本分析 Pro" />
+                    <input ref={firstFieldRef} id="model-name" value={form.name} onChange={(event) => updateForm("name", event.target.value)} aria-invalid={Boolean(formErrors.name)} aria-describedby={formErrors.name ? "model-name-error" : undefined} placeholder="例如：剧本分析 Pro" disabled={saving} />
                     {formErrors.name && <span className={styles.fieldError} id="model-name-error">{formErrors.name}</span>}
                   </div>
                   <div className={styles.field}>
                     <label htmlFor="model-provider">服务商<span className={styles.requiredMark}>*</span></label>
-                    <input id="model-provider" value={form.provider} onChange={(event) => updateForm("provider", event.target.value)} aria-invalid={Boolean(formErrors.provider)} placeholder="例如：OpenAI" />
+                    <input id="model-provider" value={form.provider} onChange={(event) => updateForm("provider", event.target.value)} aria-invalid={Boolean(formErrors.provider)} placeholder="例如：OpenAI" disabled={saving} />
                     {formErrors.provider && <span className={styles.fieldError}>{formErrors.provider}</span>}
                   </div>
                   <div className={styles.field}>
                     <label htmlFor="model-id">模型 ID<span className={styles.requiredMark}>*</span></label>
-                    <input id="model-id" value={form.modelId} onChange={(event) => updateForm("modelId", event.target.value)} aria-invalid={Boolean(formErrors.modelId)} placeholder="服务商模型标识" autoComplete="off" />
+                    <input id="model-id" value={form.modelId} onChange={(event) => updateForm("modelId", event.target.value)} aria-invalid={Boolean(formErrors.modelId)} placeholder="服务商模型标识" autoComplete="off" disabled={saving} />
                     {formErrors.modelId && <span className={styles.fieldError}>{formErrors.modelId}</span>}
                   </div>
                   <div className={styles.field}>
                     <label htmlFor="model-level">等级<span className={styles.requiredMark}>*</span></label>
-                    <input id="model-level" list="model-level-options" value={form.level} onChange={(event) => updateForm("level", event.target.value)} aria-invalid={Boolean(formErrors.level)} placeholder="例如：旗舰" />
+                    <input id="model-level" list="model-level-options" value={form.level} onChange={(event) => updateForm("level", event.target.value)} aria-invalid={Boolean(formErrors.level)} placeholder="例如：旗舰" disabled={saving} />
                     <datalist id="model-level-options"><option value="轻量" /><option value="标准" /><option value="高级" /><option value="旗舰" /></datalist>
                     {formErrors.level && <span className={styles.fieldError}>{formErrors.level}</span>}
                   </div>
                   <div className={styles.fieldFull}>
                     <label htmlFor="model-endpoint">API 地址<span className={styles.requiredMark}>*</span></label>
-                    <input id="model-endpoint" type="url" value={form.endpoint} onChange={(event) => updateForm("endpoint", event.target.value)} aria-invalid={Boolean(formErrors.endpoint)} placeholder="https://api.example.com/v1" autoCapitalize="none" autoCorrect="off" />
+                    <input id="model-endpoint" type="url" value={form.endpoint} onChange={(event) => updateForm("endpoint", event.target.value)} aria-invalid={Boolean(formErrors.endpoint)} placeholder="https://api.example.com/v1" autoCapitalize="none" autoCorrect="off" disabled={saving} />
                     {formErrors.endpoint && <span className={styles.fieldError}>{formErrors.endpoint}</span>}
                   </div>
                   <div className={styles.fieldFull}>
                     <label htmlFor="model-icon">图标地址</label>
-                    <input id="model-icon" type="url" value={form.iconUrl} onChange={(event) => updateForm("iconUrl", event.target.value)} aria-invalid={Boolean(formErrors.iconUrl)} placeholder="https://…/icon.png" autoCapitalize="none" autoCorrect="off" />
+                    <input id="model-icon" type="url" value={form.iconUrl} onChange={(event) => updateForm("iconUrl", event.target.value)} aria-invalid={Boolean(formErrors.iconUrl)} placeholder="https://…/icon.png" autoCapitalize="none" autoCorrect="off" disabled={saving} />
                     {formErrors.iconUrl && <span className={styles.fieldError}>{formErrors.iconUrl}</span>}
                   </div>
                   <div className={styles.fieldFull}>
                     <label htmlFor="model-capabilities">模型能力<span className={styles.requiredMark}>*</span></label>
-                    <input id="model-capabilities" value={form.capabilities} onChange={(event) => updateForm("capabilities", event.target.value)} aria-invalid={Boolean(formErrors.capabilities)} placeholder="文本分析, 图片理解, 视频生成" />
+                    <input id="model-capabilities" value={form.capabilities} onChange={(event) => updateForm("capabilities", event.target.value)} aria-invalid={Boolean(formErrors.capabilities)} placeholder="文本分析, 图片理解, 视频生成" disabled={saving} />
                     <span className={styles.fieldHint}>用逗号分隔，Agent 会据此提示模型适用范围。</span>
                     {formErrors.capabilities && <span className={styles.fieldError}>{formErrors.capabilities}</span>}
                   </div>
                   <fieldset className={styles.fieldset}>
                     <legend><KeyRound size={12} /> API Key</legend>
                     <div className={styles.fieldFull}>
-                      <input id="model-api-key" type="password" value={form.apiKey} onChange={(event) => { updateForm("apiKey", event.target.value); if (event.target.value) updateForm("clearApiKey", false); }} placeholder={editing?.hasApiKey ? `当前：${editing.apiKeyMasked || "••••••••"}（留空不修改）` : "输入服务商 API Key"} autoComplete="new-password" />
+                      <input id="model-api-key" type="password" value={form.apiKey} onChange={(event) => { updateForm("apiKey", event.target.value); if (event.target.value) updateForm("clearApiKey", false); }} placeholder={editing?.hasApiKey ? `当前：${editing.apiKeyMasked || "••••••••"}（留空不修改）` : "输入服务商 API Key"} autoComplete="new-password" disabled={saving} />
                       <span className={styles.fieldHint}>密钥不会回显。编辑时留空表示保留原值。</span>
                     </div>
                     {editing?.hasApiKey && (
                       <label className={styles.checkboxLine}>
-                        <input type="checkbox" checked={form.clearApiKey} onChange={(event) => updateForm("clearApiKey", event.target.checked)} disabled={Boolean(form.apiKey)} />
+                        <input type="checkbox" checked={form.clearApiKey} onChange={(event) => updateForm("clearApiKey", event.target.checked)} disabled={saving || Boolean(form.apiKey)} />
                         <span><b>移除当前 API Key</b><small>保存后该模型将无法运行，直到重新配置密钥。</small></span>
                       </label>
                     )}
@@ -424,7 +502,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
                     <legend><Settings2 size={12} /> 使用状态</legend>
                     <div className={styles.toggleRow}>
                       <div className={styles.checkboxLine}><span><b>{form.enabled ? "允许 Agent 选择" : "暂时停用"}</b><small>停用不会影响历史运行记录。</small></span></div>
-                      <label className={styles.switch} aria-label="启用模型"><input type="checkbox" checked={form.enabled} onChange={(event) => updateForm("enabled", event.target.checked)} /><i /></label>
+                      <label className={styles.switch} aria-label="启用模型"><input type="checkbox" checked={form.enabled} onChange={(event) => updateForm("enabled", event.target.checked)} disabled={saving} /><i /></label>
                     </div>
                   </fieldset>
                 </div>

@@ -9,15 +9,23 @@ const FORBIDDEN_HOSTS = new Set([
 ]);
 
 export async function validateModelEndpoint(value: string): Promise<string> {
+  return validatePublicHttpsUrl(value, { allowQuery: false, purpose: "模型地址" });
+}
+
+export async function validatePublicHttpsUrl(
+  value: string,
+  options: { allowQuery?: boolean; purpose?: string } = {},
+): Promise<string> {
+  const purpose = options.purpose ?? "远程地址";
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new ApiError(400, "INVALID_MODEL_ENDPOINT", "模型地址必须是有效的 HTTPS URL。 ");
+    throw new ApiError(400, "INVALID_PUBLIC_URL", `${purpose}必须是有效的 HTTPS URL。 `);
   }
 
-  if (url.protocol !== "https:" || url.username || url.password || url.hash || url.search) {
-    throw new ApiError(400, "INVALID_MODEL_ENDPOINT", "模型地址必须使用 HTTPS，且不能包含凭据、查询参数或片段。 ");
+  if (url.protocol !== "https:" || url.username || url.password || url.hash || (!options.allowQuery && url.search)) {
+    throw new ApiError(400, "INVALID_PUBLIC_URL", `${purpose}必须使用 HTTPS，且不能包含凭据或片段。 `);
   }
 
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
@@ -32,15 +40,15 @@ export async function validateModelEndpoint(value: string): Promise<string> {
     hostname.endsWith(".nip.io") ||
     hostname.endsWith(".sslip.io")
   ) {
-    throw new ApiError(400, "UNSAFE_MODEL_ENDPOINT", "模型地址不能指向本机或内部网络。 ");
+    throw new ApiError(400, "UNSAFE_PUBLIC_URL", `${purpose}不能指向本机或内部网络。 `);
   }
 
   if (isIpLiteral(hostname)) {
     if (!isPublicIp(hostname)) {
-      throw new ApiError(400, "UNSAFE_MODEL_ENDPOINT", "模型地址不能指向私有、回环或保留 IP。 ");
+      throw new ApiError(400, "UNSAFE_PUBLIC_URL", `${purpose}不能指向私有、回环或保留 IP。 `);
     }
   } else {
-    await assertPublicDns(hostname);
+    await assertPublicDns(hostname, purpose);
   }
 
   url.hostname = hostname;
@@ -110,7 +118,7 @@ function parseIpv6(address: string): number[] | null {
   });
 }
 
-async function assertPublicDns(hostname: string): Promise<void> {
+async function assertPublicDns(hostname: string, purpose: string): Promise<void> {
   const addresses: string[] = [];
   try {
     const responses = await Promise.all(
@@ -133,13 +141,13 @@ async function assertPublicDns(hostname: string): Promise<void> {
       }
     }
   } catch {
-    throw new ApiError(400, "MODEL_ENDPOINT_DNS_FAILED", "无法验证模型地址的公网 DNS，请检查地址后重试。 ");
+    throw new ApiError(400, "PUBLIC_URL_DNS_FAILED", `无法验证${purpose}的公网 DNS，请检查地址后重试。 `);
   }
 
   if (addresses.length === 0) {
-    throw new ApiError(400, "MODEL_ENDPOINT_DNS_FAILED", "模型地址没有可用的公网 DNS 记录。 ");
+    throw new ApiError(400, "PUBLIC_URL_DNS_FAILED", `${purpose}没有可用的公网 DNS 记录。 `);
   }
   if (addresses.some((address) => !isPublicIp(address))) {
-    throw new ApiError(400, "UNSAFE_MODEL_ENDPOINT", "模型地址解析到了私有、回环或保留网络。 ");
+    throw new ApiError(400, "UNSAFE_PUBLIC_URL", `${purpose}解析到了私有、回环或保留网络。 `);
   }
 }

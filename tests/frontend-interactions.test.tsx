@@ -136,6 +136,20 @@ describe("关键按钮点击回归", () => {
 
     expect(screen.getByRole("dialog", { name: "新增项目资产" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: /资产名称/ })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: /介质属性/ })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: /制作分类/ })).toBeVisible();
+  });
+
+  test("AssetManager 点击“AI 创建资产”显示生成 dialog", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse([])));
+    const user = userEvent.setup();
+    render(<AssetManager projectId="project-1" projectName="回归测试项目" />);
+
+    await user.click(await screen.findByRole("button", { name: "AI 创建资产" }));
+
+    expect(screen.getByRole("dialog", { name: "AI 创建资产" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: /图像模型/ })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: /生成提示词/ })).toBeVisible();
   });
 });
 

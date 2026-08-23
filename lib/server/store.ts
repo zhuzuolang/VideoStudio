@@ -1,4 +1,5 @@
 import type { WorkspaceIdentity } from "./auth";
+import type { AssetRelationInput } from "../platform-types";
 import { ApiError, id, nowIso, parseJson } from "./api";
 import { maskedApiKey } from "./crypto";
 import { database } from "./runtime";
@@ -115,7 +116,8 @@ const schemaStatements = [
     id TEXT PRIMARY KEY NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    type TEXT NOT NULL,
+    media_type TEXT NOT NULL DEFAULT 'other',
+    category TEXT NOT NULL DEFAULT 'other',
     description TEXT NOT NULL DEFAULT '',
     mime_type TEXT,
     size_bytes INTEGER,
@@ -127,8 +129,24 @@ const schemaStatements = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_assets_project_type ON assets(project_id, type)`,
+  `CREATE INDEX IF NOT EXISTS idx_assets_project_media_type ON assets(project_id, media_type)`,
+  `CREATE INDEX IF NOT EXISTS idx_assets_project_category ON assets(project_id, category)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS uidx_assets_storage_key ON assets(storage_key)`,
+  `CREATE TABLE IF NOT EXISTS asset_relations (
+    id TEXT PRIMARY KEY NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    target_asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
+    target_character_id TEXT REFERENCES characters(id) ON DELETE CASCADE,
+    relation_type TEXT NOT NULL DEFAULT 'related',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    CHECK ((target_asset_id IS NOT NULL) != (target_character_id IS NOT NULL))
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_relations_project ON asset_relations(project_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_relations_source ON asset_relations(source_asset_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_relations_target_asset ON asset_relations(target_asset_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_relations_target_character ON asset_relations(target_character_id)`,
   `CREATE TABLE IF NOT EXISTS ai_models (
     id TEXT PRIMARY KEY NOT NULL,
     owner_id TEXT NOT NULL,
@@ -274,14 +292,14 @@ async function seedWorkspace(db: D1Database, ownerId: string): Promise<void> {
   );
 
   const assetSeeds = [
-    [id("ast"), fog, "雾港灯塔概念图", "image", "灯塔与冷青色海雾的主视觉参考", "image/jpeg", null, null, "https://images.unsplash.com/photo-1507525428034-b723cf961d3e", null, JSON.stringify({ tags: ["场景", "氛围"] }), "ready"],
-    [id("ast"), fog, "港口雾笛氛围", "audio", "低频雾笛与远处浪声的声音参考", "audio/mpeg", null, null, null, null, JSON.stringify({ duration: 48, tags: ["环境音"] }), "planned"],
-    [id("ast"), fog, "旧灯塔结构", "model3d", "用于预演的灯塔粗模", "model/gltf-binary", null, null, null, null, JSON.stringify({ format: "glb", lod: "proxy" }), "planned"],
-    [id("ast"), memory, "典当行室内概念图", "image", "午夜蓝与琥珀金的空间设定", "image/jpeg", null, null, "https://images.unsplash.com/photo-1518005020951-eccb494ad742", null, JSON.stringify({ tags: ["场景", "美术"] }), "ready"],
-    [id("ast"), memory, "记忆胶片旋转测试", "video", "琥珀胶片悬浮旋转的特效参考", "video/mp4", null, null, null, null, JSON.stringify({ duration: 6, loop: true }), "planned"],
+    [id("ast"), fog, "雾港灯塔概念图", "image", "scene", "灯塔与冷青色海雾的主视觉参考", "image/jpeg", null, null, "https://images.unsplash.com/photo-1507525428034-b723cf961d3e", null, JSON.stringify({ tags: ["场景", "氛围"] }), "ready"],
+    [id("ast"), fog, "港口雾笛氛围", "audio", "environment", "低频雾笛与远处浪声的声音参考", "audio/mpeg", null, null, null, null, JSON.stringify({ duration: 48, tags: ["环境音"] }), "planned"],
+    [id("ast"), fog, "旧灯塔结构", "model3d", "scene", "用于预演的灯塔粗模", "model/gltf-binary", null, null, null, null, JSON.stringify({ format: "glb", lod: "proxy" }), "planned"],
+    [id("ast"), memory, "典当行室内概念图", "image", "scene", "午夜蓝与琥珀金的空间设定", "image/jpeg", null, null, "https://images.unsplash.com/photo-1518005020951-eccb494ad742", null, JSON.stringify({ tags: ["场景", "美术"] }), "ready"],
+    [id("ast"), memory, "记忆胶片旋转测试", "video", "prop", "琥珀胶片悬浮旋转的特效参考", "video/mp4", null, null, null, null, JSON.stringify({ duration: 6, loop: true }), "planned"],
   ] as const;
   for (const asset of assetSeeds) {
-    statements.push(db.prepare(`INSERT INTO assets (id, project_id, name, type, description, mime_type, size_bytes, storage_key, source_url, thumbnail_url, metadata_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(...asset, now, now));
+    statements.push(db.prepare(`INSERT INTO assets (id, project_id, name, media_type, category, description, mime_type, size_bytes, storage_key, source_url, thumbnail_url, metadata_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(...asset, now, now));
   }
 
   statements.push(
@@ -356,20 +374,79 @@ export function serializeModel(row: Record<string, unknown>): Record<string, unk
 
 export async function serializeAssetById(db: D1Database, assetId: string): Promise<Record<string, unknown> | null> {
   const row = await db.prepare(`${assetSelect} WHERE id = ?`).bind(assetId).first<Record<string, unknown>>();
-  return row ? serializeAsset(row) : null;
+  return row ? serializeAsset(row, await listAssetRelations(db, String(row.projectId), assetId)) : null;
 }
 
-const assetSelect = `SELECT id, project_id AS projectId, name, type, description, mime_type AS mimeType,
+export async function listAssetRelations(db: D1Database, projectId: string, assetId: string): Promise<Record<string, unknown>[]> {
+  const rows = await allRows<Record<string, unknown>>(db.prepare(`SELECT r.id,
+    CASE WHEN r.target_asset_id IS NOT NULL THEN 'asset' ELSE 'character' END AS targetType,
+    COALESCE(r.target_asset_id, r.target_character_id) AS targetId,
+    COALESCE(a.name, c.name) AS targetName,
+    a.media_type AS targetMediaType, a.category AS targetCategory,
+    r.relation_type AS relationType, r.note, 'outgoing' AS direction
+    FROM asset_relations r
+    LEFT JOIN assets a ON a.id = r.target_asset_id AND a.project_id = r.project_id
+    LEFT JOIN characters c ON c.id = r.target_character_id AND c.project_id = r.project_id
+    WHERE r.project_id = ? AND r.source_asset_id = ?
+    UNION ALL
+    SELECT r.id, 'asset' AS targetType, r.source_asset_id AS targetId, source.name AS targetName,
+      source.media_type AS targetMediaType, source.category AS targetCategory,
+      r.relation_type AS relationType, r.note, 'incoming' AS direction
+    FROM asset_relations r JOIN assets source ON source.id = r.source_asset_id AND source.project_id = r.project_id
+    WHERE r.project_id = ? AND r.target_asset_id = ?
+    ORDER BY id`).bind(projectId, assetId, projectId, assetId));
+  return rows.filter((row) => row.targetName);
+}
+
+export async function replaceAssetRelations(
+  db: D1Database,
+  projectId: string,
+  sourceAssetId: string,
+  relations: AssetRelationInput[],
+): Promise<void> {
+  await db.batch(await prepareAssetRelationStatements(db, projectId, sourceAssetId, relations));
+}
+
+export async function prepareAssetRelationStatements(
+  db: D1Database,
+  projectId: string,
+  sourceAssetId: string,
+  relations: AssetRelationInput[],
+): Promise<D1PreparedStatement[]> {
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`DELETE FROM asset_relations WHERE project_id = ? AND source_asset_id = ?`).bind(projectId, sourceAssetId),
+  ];
+  for (const relation of relations) {
+    if (relation.targetType === "asset" && relation.targetId === sourceAssetId) {
+      throw new ApiError(400, "INVALID_ASSET_RELATION", "资产不能关联自身。 ");
+    }
+    const table = relation.targetType === "asset" ? "assets" : "characters";
+    const target = await db.prepare(`SELECT id FROM ${table} WHERE id = ? AND project_id = ?`).bind(relation.targetId, projectId).first();
+    if (!target) throw new ApiError(400, "INVALID_ASSET_RELATION", "关联目标不存在或不属于当前项目。 ");
+    statements.push(db.prepare(`INSERT INTO asset_relations (
+      id, project_id, source_asset_id, target_asset_id, target_character_id, relation_type, note, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      id("rel"), projectId, sourceAssetId,
+      relation.targetType === "asset" ? relation.targetId : null,
+      relation.targetType === "character" ? relation.targetId : null,
+      relation.relationType?.trim() || "related", relation.note?.trim() || "", nowIso(),
+    ));
+  }
+  return statements;
+}
+
+const assetSelect = `SELECT id, project_id AS projectId, name, media_type AS mediaType, category, description, mime_type AS mimeType,
   size_bytes AS sizeBytes, storage_key AS storageKey, source_url AS sourceUrl,
   thumbnail_url AS thumbnailUrl, metadata_json AS metadataJson, status,
   created_at AS createdAt, updated_at AS updatedAt FROM assets`;
 
-function serializeAsset(row: Record<string, unknown>): Record<string, unknown> {
+function serializeAsset(row: Record<string, unknown>, relations: Record<string, unknown>[] = []): Record<string, unknown> {
   return {
     ...row,
     metadata: parseJson(row.metadataJson, {}),
     hasContent: Boolean(row.storageKey),
     contentUrl: row.storageKey ? `/api/projects/${row.projectId}/assets/${row.id}/content` : null,
+    relations,
     metadataJson: undefined,
     storageKey: undefined,
   };
@@ -453,7 +530,7 @@ export async function workspacePayload(
     episodes: episodeRows,
     characters: characterRows.map((row) => ({ ...row, relationships: parseJson(row.relationshipsJson, []), relationshipsJson: undefined })),
     scripts: scriptRows.map((script) => ({ ...script, scenes: scenesByScript.get(String(script.id)) ?? [] })),
-    assets: assetRows.map(serializeAsset),
+    assets: await Promise.all(assetRows.map(async (row) => serializeAsset(row, await listAssetRelations(db, activeProjectId, String(row.id))))),
     models,
     agentRuns: agentRows.map((row) => serializeAgentRun(row, sourcesByRun.get(String(row.id)) ?? [])),
   };

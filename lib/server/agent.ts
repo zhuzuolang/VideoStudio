@@ -3,7 +3,7 @@ import { decryptApiKey } from "./crypto";
 import { validateModelEndpoint } from "./outbound";
 import { sceneSelect, serializeSceneRecord } from "./records";
 import { mediaBucket } from "./runtime";
-import { allRows } from "./store";
+import { allRows, listAssetRelations } from "./store";
 
 export type AgentSource = {
   sourceType: string;
@@ -94,11 +94,11 @@ export async function collectAgentSources(
     sources.push({ sourceType: "scene", sourceId: String(row.id), title: `场次 ${row.sceneNo} · ${row.heading}`, snapshot: serializeSceneRecord(row) });
   }
 
-  const assetRows = await selectedRows(db, `SELECT id, name, type, description, mime_type AS mimeType,
+  const assetRows = await selectedRows(db, `SELECT id, name, media_type AS mediaType, category, description, mime_type AS mimeType,
     size_bytes AS sizeBytes, storage_key AS storageKey, source_url AS sourceUrl,
     thumbnail_url AS thumbnailUrl, metadata_json AS metadataJson, status FROM assets`, "assets", projectId, selection.assetIds);
   const imageCandidates = assetRows.filter((asset) => {
-    if (String(asset.type) !== "image") return false;
+    if (String(asset.mediaType) !== "image") return false;
     const localSize = Number(asset.sizeBytes ?? 0);
     return Boolean((asset.storageKey && localSize > 0 && localSize <= 8 * 1024 * 1024) || (typeof asset.sourceUrl === "string" && asset.sourceUrl.startsWith("https://")));
   });
@@ -108,16 +108,17 @@ export async function collectAgentSources(
   }
   for (const asset of assetRows) {
     const snapshot: Record<string, unknown> = {
-      id: asset.id, name: asset.name, type: asset.type, description: asset.description,
+      id: asset.id, name: asset.name, mediaType: asset.mediaType, category: asset.category, description: asset.description,
       mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, sourceUrl: asset.sourceUrl,
       thumbnailUrl: asset.thumbnailUrl, metadata: parseJson(asset.metadataJson, {}), status: asset.status,
+      relations: await listAssetRelations(db, projectId, String(asset.id)),
     };
     let mediaPart: Record<string, unknown> | undefined;
     const mimeType = String(asset.mimeType ?? "");
     if (mimeType.startsWith("text/") && asset.storageKey && Number(asset.sizeBytes ?? 0) <= 200_000) {
       const object = await mediaBucket().get(String(asset.storageKey));
       if (object) snapshot.contentExcerpt = (await object.text()).slice(0, 200_000);
-    } else if (String(asset.type) === "image") {
+    } else if (String(asset.mediaType) === "image") {
       if (asset.storageKey && Number(asset.sizeBytes ?? 0) <= 8 * 1024 * 1024) {
         const object = await mediaBucket().get(String(asset.storageKey));
         if (object) mediaPart = { type: "image_url", image_url: { url: `data:${mimeType || "image/jpeg"};base64,${arrayBufferToBase64(await object.arrayBuffer())}` } };
@@ -158,6 +159,14 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+export function chatCompletionsEndpoint(value: string): string {
+  const url = new URL(value);
+  const path = url.pathname.replace(/\/+$/, "");
+  if (/\/chat\/completions$/i.test(path)) return url.toString();
+  url.pathname = `${path}/chat/completions`.replace(/\/+/g, "/");
+  return url.toString();
+}
+
 export async function callConfiguredModel(
   model: Record<string, unknown>,
   prompt: string,
@@ -166,7 +175,8 @@ export async function callConfiguredModel(
 ): Promise<{ response: string; usage: Record<string, unknown>; requestMeta: Record<string, unknown> }> {
   if (!model.enabled) throw new ApiError(400, "MODEL_DISABLED", "所选模型已停用。 ");
   if (!model.api_key_ciphertext || !model.api_key_iv) throw new ApiError(400, "MODEL_API_KEY_MISSING", "请先为所选模型配置 API Key。 ");
-  const endpoint = await validateModelEndpoint(String(model.endpoint));
+  const configuredEndpoint = await validateModelEndpoint(String(model.endpoint));
+  const endpoint = await validateModelEndpoint(chatCompletionsEndpoint(configuredEndpoint));
   let apiKey: string;
   try { apiKey = await decryptApiKey(String(model.api_key_ciphertext), String(model.api_key_iv)); }
   catch (error) {

@@ -15,6 +15,13 @@
       "when": 1787470178276,
       "tag": "0001_dapper_frank_castle",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787485690633,
+      "tag": "0002_asset_dimensions_relations",
+      "breakpoints": true
     }
   ]
 }

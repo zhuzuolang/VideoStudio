@@ -28,14 +28,10 @@ export async function POST(request: Request): Promise<Response> {
     const targetPlatform = optionalString(body, "targetPlatform", { max: 120 }) || "短视频平台";
     const coverUrl = optionalString(body, "coverUrl", { max: 2_000, nullable: true });
     const projectId = id("prj");
-    const episodeId = id("ep");
-    const scriptId = id("scr");
     const now = nowIso();
     await db.batch([
       db.prepare(`INSERT INTO projects (id, owner_id, name, genre, description, status, episode_count, single_episode_duration, aspect_ratio, target_platform, cover_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(projectId, identity.userId, name, genre, description, status, episodeCount, duration, aspectRatio, targetPlatform, coverUrl ?? null, now, now),
       db.prepare(`INSERT INTO project_story (project_id, title, logline, synopsis, worldview, core_conflict, themes_json, style_reference, story_bible, status, updated_at) VALUES (?, ?, '', '', '', '', '[]', '', '', 'draft', ?)`).bind(projectId, name, now),
-      db.prepare(`INSERT INTO episodes (id, project_id, episode_no, title, summary, hook, duration_seconds, status, created_at, updated_at) VALUES (?, ?, 1, '第1集', '', '', ?, 'outline', ?, ?)`).bind(episodeId, projectId, duration, now, now),
-      db.prepare(`INSERT INTO scripts (id, project_id, episode_id, title, version, status, body_text, created_at, updated_at) VALUES (?, ?, ?, '第1集 剧本', 1, 'draft', '', ?, ?)`).bind(scriptId, projectId, episodeId, now, now),
       db.prepare(`UPDATE workspaces SET active_project_id = ?, updated_at = ? WHERE user_id = ?`).bind(projectId, now, identity.userId),
     ]);
     const project = (await listProjects(db, identity.userId)).find((item) => item.id === projectId);

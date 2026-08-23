@@ -73,7 +73,7 @@
   font-family: var(--font-geist-mono, monospace);
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: .12em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
@@ -106,7 +106,10 @@
   min-height: 38px;
   border-radius: 9px;
   cursor: pointer;
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
 }
 
 .primaryButton,
@@ -154,7 +157,7 @@
 .dangerButton:disabled,
 .iconButton:disabled {
   cursor: not-allowed;
-  opacity: .55;
+  opacity: 0.55;
 }
 
 .iconButton {
@@ -217,7 +220,7 @@
 }
 
 .spinner {
-  animation: moduleSpin .9s linear infinite;
+  animation: moduleSpin 0.9s linear infinite;
 }
 
 .notice {
@@ -235,13 +238,21 @@
 
 .noticeError {
   color: var(--module-danger);
-  border-color: color-mix(in srgb, var(--module-danger) 22%, var(--module-line));
+  border-color: color-mix(
+    in srgb,
+    var(--module-danger) 22%,
+    var(--module-line)
+  );
   background: color-mix(in srgb, var(--module-danger) 6%, var(--module-paper));
 }
 
 .noticeSuccess {
   color: var(--module-success);
-  border-color: color-mix(in srgb, var(--module-success) 22%, var(--module-line));
+  border-color: color-mix(
+    in srgb,
+    var(--module-success) 22%,
+    var(--module-line)
+  );
   background: color-mix(in srgb, var(--module-success) 6%, var(--module-paper));
 }
 
@@ -267,7 +278,7 @@
 }
 
 .modelCardDisabled {
-  opacity: .7;
+  opacity: 0.7;
 }
 
 .cardTitle {
@@ -326,7 +337,8 @@
 
 .enabledDot {
   background: var(--module-success);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--module-success) 13%, transparent);
+  box-shadow: 0 0 0 4px
+    color-mix(in srgb, var(--module-success) 13%, transparent);
 }
 
 .disabledDot {
@@ -393,17 +405,94 @@
 
 .statusBadge {
   color: var(--module-success);
-  background: color-mix(in srgb, var(--module-success) 10%, var(--module-paper));
+  background: color-mix(
+    in srgb,
+    var(--module-success) 10%,
+    var(--module-paper)
+  );
 }
 
 .statusBadgeWarning {
   color: var(--module-warning);
-  background: color-mix(in srgb, var(--module-warning) 10%, var(--module-paper));
+  background: color-mix(
+    in srgb,
+    var(--module-warning) 10%,
+    var(--module-paper)
+  );
 }
 
 .statusBadgeError {
   color: var(--module-danger);
   background: color-mix(in srgb, var(--module-danger) 10%, var(--module-paper));
+}
+
+.modelTestResult {
+  display: grid;
+  gap: 6px;
+  min-height: 72px;
+  padding: 10px;
+  border: 1px solid var(--module-line);
+  border-radius: 9px;
+  background: var(--module-soft);
+}
+
+.modelTestResult > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.modelTestResult b {
+  font-size: 10px;
+}
+
+.modelTestResult span,
+.modelTestResult small {
+  color: var(--module-muted);
+  font-size: 9px;
+}
+
+.modelTestResult p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: var(--module-ink);
+  font-size: 10px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.modelTestIdle {
+  color: var(--module-muted);
+}
+
+.modelTestSuccess {
+  border-color: color-mix(
+    in srgb,
+    var(--module-success) 26%,
+    var(--module-line)
+  );
+  background: color-mix(in srgb, var(--module-success) 6%, var(--module-paper));
+}
+
+.modelTestSuccess > div > svg,
+.modelTestSuccess b {
+  color: var(--module-success);
+}
+
+.modelTestError {
+  border-color: color-mix(
+    in srgb,
+    var(--module-danger) 24%,
+    var(--module-line)
+  );
+  background: color-mix(in srgb, var(--module-danger) 5%, var(--module-paper));
+}
+
+.modelTestError > div > svg,
+.modelTestError b {
+  color: var(--module-danger);
 }
 
 .cardActions {
@@ -427,6 +516,29 @@
   gap: 6px;
 }
 
+.testButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--module-line);
+  border-radius: 8px;
+  color: var(--module-ink);
+  background: var(--module-paper);
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.testButton:hover:not(:disabled) {
+  border-color: var(--module-accent);
+  color: var(--module-accent-strong);
+  background: var(--module-accent-soft);
+}
+
 .dialogBackdrop {
   position: fixed;
   z-index: 110;
@@ -435,7 +547,7 @@
   place-items: center;
   overflow-y: auto;
   padding: 24px;
-  background: rgba(23, 23, 20, .58);
+  background: rgba(23, 23, 20, 0.58);
   backdrop-filter: blur(4px);
 }
 
@@ -446,7 +558,7 @@
   border: 1px solid var(--module-line);
   border-radius: 15px;
   background: var(--module-paper);
-  box-shadow: 0 30px 90px rgba(0, 0, 0, .25);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.25);
 }
 
 .dialogHeader,
@@ -493,6 +605,13 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 14px;
+}
+
+.formShell {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .field,
@@ -645,7 +764,7 @@
   height: 16px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, .2);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
   transition: transform 160ms ease;
   content: "";
 }
@@ -721,7 +840,7 @@
   z-index: 2;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(180deg, transparent 55%, rgba(0, 0, 0, .34));
+  background: linear-gradient(180deg, transparent 55%, rgba(0, 0, 0, 0.34));
   content: "";
 }
 
@@ -746,7 +865,7 @@
   top: 10px;
   left: 10px;
   color: #fff;
-  background: rgba(23, 23, 20, .68);
+  background: rgba(23, 23, 20, 0.68);
   backdrop-filter: blur(6px);
 }
 
@@ -797,8 +916,8 @@
 
 .assetMenu .iconButton {
   color: #fff;
-  border-color: rgba(255, 255, 255, .22);
-  background: rgba(23, 23, 20, .62);
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(23, 23, 20, 0.62);
   backdrop-filter: blur(6px);
 }
 
@@ -1049,7 +1168,11 @@
 
 .historyStatusSuccess {
   color: var(--module-success);
-  background: color-mix(in srgb, var(--module-success) 10%, var(--module-paper));
+  background: color-mix(
+    in srgb,
+    var(--module-success) 10%,
+    var(--module-paper)
+  );
 }
 
 .historyStatusError {
@@ -1105,8 +1228,94 @@
   border: 0;
 }
 
+.assetHeaderActions,
+.assetDimensions,
+.relationChips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.assetFilters {
+  display: grid;
+  grid-template-columns: minmax(190px, 280px) minmax(0, 1fr);
+  gap: 10px 16px;
+  padding: 14px;
+  border: 1px solid var(--module-line);
+  border-radius: 12px;
+  background: var(--module-paper);
+}
+
+.assetFilters > .searchWrap {
+  grid-row: 1 / 3;
+  align-self: center;
+}
+
+.filterGroup {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.filterLegend {
+  flex: 0 0 54px;
+  padding: 0;
+  color: var(--module-muted);
+  font-size: 9px;
+}
+
+.assetDimensions {
+  margin: 7px 0 0;
+}
+
+.relationChips {
+  margin: 9px 0;
+}
+
+.relationChips span {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: var(--module-muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--module-soft);
+}
+
+.relationPicker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.relationPicker > div {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--module-soft);
+}
+
+.relationPicker b,
+.relationPicker small {
+  color: var(--module-muted);
+  font-size: 9px;
+}
+
 @keyframes moduleSpin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1180px) {
@@ -1134,6 +1343,14 @@
     grid-template-columns: 1fr;
   }
 
+  .assetFilters {
+    grid-template-columns: 1fr;
+  }
+
+  .assetFilters > .searchWrap {
+    grid-row: auto;
+  }
+
   .agentLayout {
     grid-template-columns: 1fr;
   }
@@ -1156,6 +1373,13 @@
 
   .fieldset {
     grid-column: auto;
+  }
+
+  .assetHeaderActions,
+  .relationPicker,
+  .filterGroup {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 
   .dialogBackdrop {

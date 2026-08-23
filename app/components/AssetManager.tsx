@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- project assets use authenticated and user-provided URLs. */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -13,18 +15,35 @@ import {
   MapPin,
   Music2,
   Package,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
   Shirt,
+  Sparkles,
   Trash2,
   Upload,
   UserRound,
   Video,
+  WandSparkles,
   X,
 } from "lucide-react";
-import { ASSET_TYPES, type AssetType, type ProjectAsset, type ProjectAssetInput } from "@/lib/platform-types";
-import { apiRequest, formatCompactDate, joinClassNames } from "./platform-client";
+import {
+  ASSET_CATEGORIES,
+  ASSET_MEDIA_TYPES,
+  type AiModel,
+  type AssetCategory,
+  type AssetMediaType,
+  type AssetRelationInput,
+  type ProjectAsset,
+  type ProjectAssetInput,
+} from "@/lib/platform-types";
+import {
+  apiRequest,
+  getModelCapabilities,
+  formatCompactDate,
+  joinClassNames,
+} from "./platform-client";
 import styles from "./PlatformModules.module.css";
 
 type AssetManagerProps = {
@@ -34,36 +53,72 @@ type AssetManagerProps = {
   refreshKey?: number;
   onAssetsChange?: (assets: ProjectAsset[]) => void;
 };
-
-type UploadMode = "file" | "url";
-
+type CharacterOption = { id: string; name: string };
+type SourceMode = "file" | "url";
+type DialogMode = "asset" | "generate" | null;
 type AssetForm = {
   name: string;
-  type: AssetType;
+  mediaType: AssetMediaType;
+  category: AssetCategory;
   description: string;
   sourceUrl: string;
   thumbnailUrl: string;
+  relatedAssetIds: string[];
+  relatedCharacterIds: string[];
+};
+type GenerateForm = {
+  modelId: string;
+  name: string;
+  category: AssetCategory;
+  prompt: string;
+  aspectRatio: string;
+  size: string;
+  relatedAssetIds: string[];
+  relatedCharacterIds: string[];
 };
 
-const ASSET_TYPE_META: Record<AssetType, { label: string; icon: LucideIcon }> = {
-  image: { label: "图片", icon: ImageIcon },
-  video: { label: "视频", icon: Video },
-  audio: { label: "音频", icon: Music2 },
-  model3d: { label: "3D 模型", icon: Box },
-  document: { label: "文档", icon: FileText },
+const MEDIA_META: Record<AssetMediaType, { label: string; icon: LucideIcon }> =
+  {
+    image: { label: "图片", icon: ImageIcon },
+    video: { label: "视频", icon: Video },
+    audio: { label: "音频", icon: Music2 },
+    model3d: { label: "3D", icon: Box },
+    document: { label: "文档", icon: FileText },
+    other: { label: "其他", icon: Package },
+  };
+const CATEGORY_META: Record<
+  AssetCategory,
+  { label: string; icon: LucideIcon }
+> = {
   character: { label: "人物", icon: UserRound },
   costume: { label: "服装", icon: Shirt },
   prop: { label: "道具", icon: Package },
   scene: { label: "场景", icon: MapPin },
+  environment: { label: "环境", icon: MapPin },
+  vehicle: { label: "载具", icon: Package },
+  storyboard: { label: "故事板", icon: FileText },
+  reference: { label: "参考", icon: ImageIcon },
   other: { label: "其他", icon: Package },
 };
-
-const EMPTY_FORM: AssetForm = {
+const EMPTY_ASSET: AssetForm = {
   name: "",
-  type: "image",
+  mediaType: "image",
+  category: "reference",
   description: "",
   sourceUrl: "",
   thumbnailUrl: "",
+  relatedAssetIds: [],
+  relatedCharacterIds: [],
+};
+const EMPTY_GENERATE: GenerateForm = {
+  modelId: "",
+  name: "",
+  category: "character",
+  prompt: "",
+  aspectRatio: "1:1",
+  size: "",
+  relatedAssetIds: [],
+  relatedCharacterIds: [],
 };
 
 function isHttpUrl(value: string): boolean {
@@ -74,248 +129,528 @@ function isHttpUrl(value: string): boolean {
     return false;
   }
 }
+function relationInputs(
+  form: Pick<AssetForm, "relatedAssetIds" | "relatedCharacterIds">,
+): AssetRelationInput[] {
+  return [
+    ...form.relatedAssetIds.map((targetId) => ({
+      targetType: "asset" as const,
+      targetId,
+    })),
+    ...form.relatedCharacterIds.map((targetId) => ({
+      targetType: "character" as const,
+      targetId,
+    })),
+  ];
+}
+function isImageModel(model: AiModel): boolean {
+  const capabilities = getModelCapabilities(model).map((value) =>
+    value.toLowerCase(),
+  );
+  return (
+    model.enabled &&
+    model.hasApiKey &&
+    (capabilities.some((value) =>
+      [
+        "image-generation",
+        "image_generation",
+        "text-to-image",
+        "图片生成",
+        "图像生成",
+      ].includes(value),
+    ) ||
+      /seedream|dall-e|image generation|text-to-image|图片生成|图像生成/i.test(
+        `${model.name} ${model.modelId}`,
+      ))
+  );
+}
 
 function AssetPreview({ asset }: { asset: ProjectAsset }) {
-  const meta = ASSET_TYPE_META[asset.type] ?? ASSET_TYPE_META.other;
-  const PreviewIcon = meta.icon;
-  const imageSource = asset.thumbnailUrl || (asset.type === "image" ? asset.sourceUrl : null);
+  const Icon = MEDIA_META[asset.mediaType]?.icon ?? Package;
+  const imageSource =
+    asset.mediaType === "image"
+      ? asset.contentUrl || asset.thumbnailUrl || asset.sourceUrl
+      : asset.thumbnailUrl;
   return (
     <div className={styles.assetPreview}>
-      <PreviewIcon size={30} aria-hidden="true" />
+      <Icon size={30} aria-hidden="true" />
       {imageSource && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={imageSource} alt={`${asset.name}预览`} onError={(event) => { event.currentTarget.style.display = "none"; }} />
+        <img
+          key={imageSource}
+          src={imageSource}
+          alt={`${asset.name}预览`}
+          onError={(event) => {
+            event.currentTarget.style.display = "none";
+          }}
+        />
       )}
-      <span className={styles.typeBadge}><PreviewIcon size={11} /> {meta.label}</span>
+      <span className={styles.typeBadge}>
+        <Icon size={11} /> {MEDIA_META[asset.mediaType].label}
+      </span>
     </div>
   );
 }
 
-export default function AssetManager({ projectId, projectName, className, refreshKey, onAssetsChange }: AssetManagerProps) {
+type RelationFieldsProps = {
+  characters: CharacterOption[];
+  assets: ProjectAsset[];
+  value: Pick<AssetForm, "relatedAssetIds" | "relatedCharacterIds">;
+  onToggle: (
+    kind: "asset" | "character",
+    targetId: string,
+    checked: boolean,
+  ) => void;
+};
+
+function RelationFields({
+  characters,
+  assets,
+  value,
+  onToggle,
+}: RelationFieldsProps) {
+  return (
+    <fieldset className={styles.fieldset}>
+      <legend>关联人物与资产</legend>
+      <div className={styles.relationPicker}>
+        <div>
+          <b>人物</b>
+          {characters.length ? (
+            characters.map((character) => (
+              <label className={styles.checkboxLine} key={character.id}>
+                <input
+                  type="checkbox"
+                  checked={value.relatedCharacterIds.includes(character.id)}
+                  onChange={(event) =>
+                    onToggle("character", character.id, event.target.checked)
+                  }
+                />
+                <span>{character.name}</span>
+              </label>
+            ))
+          ) : (
+            <small>当前项目暂无人物</small>
+          )}
+        </div>
+        <div>
+          <b>已有资产</b>
+          {assets.length ? (
+            assets.map((asset) => (
+              <label className={styles.checkboxLine} key={asset.id}>
+                <input
+                  type="checkbox"
+                  checked={value.relatedAssetIds.includes(asset.id)}
+                  onChange={(event) =>
+                    onToggle("asset", asset.id, event.target.checked)
+                  }
+                />
+                <span>{asset.name}</span>
+              </label>
+            ))
+          ) : (
+            <small>暂无其他资产</small>
+          )}
+        </div>
+      </div>
+    </fieldset>
+  );
+}
+
+export default function AssetManager({
+  projectId,
+  projectName,
+  className,
+  refreshKey,
+  onAssetsChange,
+}: AssetManagerProps) {
   const [assets, setAssets] = useState<ProjectAsset[]>([]);
+  const [characters, setCharacters] = useState<CharacterOption[]>([]);
+  const [models, setModels] = useState<AiModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<"all" | AssetType>("all");
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [uploadMode, setUploadMode] = useState<UploadMode>("file");
-  const [form, setForm] = useState<AssetForm>(EMPTY_FORM);
-  const [file, setFile] = useState<File | null>(null);
   const [formError, setFormError] = useState("");
+  const [characterLoadError, setCharacterLoadError] = useState("");
+  const [modelLoadError, setModelLoadError] = useState("");
+  const [search, setSearch] = useState("");
+  const [mediaFilter, setMediaFilter] = useState<"all" | AssetMediaType>("all");
+  const [categoryFilter, setCategoryFilter] = useState<"all" | AssetCategory>(
+    "all",
+  );
+  const [dialog, setDialog] = useState<DialogMode>(null);
+  const [editing, setEditing] = useState<ProjectAsset | null>(null);
+  const [sourceMode, setSourceMode] = useState<SourceMode>("file");
+  const [form, setForm] = useState<AssetForm>(EMPTY_ASSET);
+  const [generateForm, setGenerateForm] =
+    useState<GenerateForm>(EMPTY_GENERATE);
+  const [file, setFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [dirty, setDirty] = useState(false);
   const requestSequence = useRef(0);
+  const characterRequestSequence = useRef(0);
+  const modelRequestSequence = useRef(0);
   const previousRefreshKey = useRef(refreshKey);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const onAssetsChangeRef = useRef(onAssetsChange);
-
   useEffect(() => {
     onAssetsChangeRef.current = onAssetsChange;
   }, [onAssetsChange]);
+
+  const loadCharacters = useCallback(async () => {
+    const sequence = ++characterRequestSequence.current;
+    if (!projectId) {
+      setCharacters([]);
+      setCharacterLoadError("");
+      return;
+    }
+    setCharacterLoadError("");
+    try {
+      const data = await apiRequest<
+        CharacterOption[] | { characters: CharacterOption[] }
+      >(`/api/projects/${encodeURIComponent(projectId)}/characters`, {
+        cache: "no-store",
+      });
+      if (sequence !== characterRequestSequence.current) return;
+      setCharacters(Array.isArray(data) ? data : (data.characters ?? []));
+    } catch (reason) {
+      if (sequence !== characterRequestSequence.current) return;
+      setCharacters([]);
+      setCharacterLoadError(
+        reason instanceof Error ? reason.message : "人物关联选项加载失败。",
+      );
+    }
+  }, [projectId]);
+
+  const loadModels = useCallback(async () => {
+    const sequence = ++modelRequestSequence.current;
+    if (!projectId) {
+      setModels([]);
+      setModelLoadError("");
+      return;
+    }
+    setModelLoadError("");
+    try {
+      const data = await apiRequest<AiModel[] | { models: AiModel[] }>(
+        "/api/models",
+        { cache: "no-store" },
+      );
+      if (sequence !== modelRequestSequence.current) return;
+      setModels(Array.isArray(data) ? data : (data.models ?? []));
+    } catch (reason) {
+      if (sequence !== modelRequestSequence.current) return;
+      setModels([]);
+      setModelLoadError(
+        reason instanceof Error ? reason.message : "图像模型选项加载失败。",
+      );
+    }
+  }, [projectId]);
 
   const loadAssets = useCallback(async () => {
     const sequence = ++requestSequence.current;
     if (!projectId) {
       setAssets([]);
       setLoading(false);
-      setError("");
       return;
     }
     setLoading(true);
     setError("");
     try {
-      const data = await apiRequest<ProjectAsset[] | { assets: ProjectAsset[] }>(`/api/projects/${encodeURIComponent(projectId)}/assets`, { cache: "no-store" });
+      const assetData = await apiRequest<
+        ProjectAsset[] | { assets: ProjectAsset[] }
+      >(`/api/projects/${encodeURIComponent(projectId)}/assets`, {
+        cache: "no-store",
+      });
       if (sequence !== requestSequence.current) return;
-      const nextAssets = Array.isArray(data) ? data : Array.isArray(data.assets) ? data.assets : [];
+      const nextAssets = Array.isArray(assetData)
+        ? assetData
+        : (assetData.assets ?? []);
       setAssets(nextAssets);
       onAssetsChangeRef.current?.(nextAssets);
-    } catch (requestError) {
-      if (sequence !== requestSequence.current) return;
-      setAssets([]);
-      setError(requestError instanceof Error ? requestError.message : "资产加载失败，请重试。");
+    } catch (reason) {
+      if (sequence === requestSequence.current) {
+        setAssets([]);
+        setError(
+          reason instanceof Error ? reason.message : "资产加载失败，请重试。",
+        );
+      }
     } finally {
       if (sequence === requestSequence.current) setLoading(false);
     }
   }, [projectId]);
-
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setSearch("");
-      setFilter("all");
-      setDialogOpen(false);
+      setMediaFilter("all");
+      setCategoryFilter("all");
+      setDialog(null);
+      setCharacters([]);
+      setModels([]);
+      void loadCharacters();
+      void loadModels();
       void loadAssets();
     }, 0);
-    return () => window.clearTimeout(timer);
-  }, [loadAssets]);
-
+    return () => clearTimeout(timer);
+  }, [loadAssets, loadCharacters, loadModels]);
   useEffect(() => {
     if (Object.is(previousRefreshKey.current, refreshKey)) return;
     previousRefreshKey.current = refreshKey;
-    const timer = window.setTimeout(() => void loadAssets(), 0);
-    return () => window.clearTimeout(timer);
-  }, [loadAssets, refreshKey]);
-
+    const timer = window.setTimeout(() => {
+      void loadCharacters();
+      void loadModels();
+      void loadAssets();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [loadAssets, loadCharacters, loadModels, refreshKey]);
   useEffect(() => {
     if (!success) return;
     const timer = window.setTimeout(() => setSuccess(""), 3200);
-    return () => window.clearTimeout(timer);
+    return () => clearTimeout(timer);
   }, [success]);
-
   useEffect(() => {
-    if (!dialogOpen) return;
+    if (!dialog) return;
     const timer = window.setTimeout(() => nameInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(timer);
-  }, [dialogOpen]);
-
+    return () => clearTimeout(timer);
+  }, [dialog]);
   useEffect(() => {
-    if (!dialogOpen) return;
-    function handleEscape(event: KeyboardEvent) {
-      if (event.key !== "Escape" || saving) return;
-      if (!dirty || window.confirm("上传信息尚未保存，确定关闭吗？")) setDialogOpen(false);
-    }
-    window.addEventListener("keydown", handleEscape);
-    return () => {
-      window.removeEventListener("keydown", handleEscape);
+    if (!dialog) return;
+    const listener = (event: KeyboardEvent) => {
+      if (
+        event.key === "Escape" &&
+        !saving &&
+        (!dirty || window.confirm("当前修改尚未保存，确定关闭吗？"))
+      )
+        setDialog(null);
     };
-  }, [dialogOpen, dirty, saving]);
+    addEventListener("keydown", listener);
+    return () => removeEventListener("keydown", listener);
+  }, [dialog, dirty, saving]);
 
-  const counts = useMemo(() => {
-    const result = new Map<AssetType, number>();
-    for (const asset of assets) result.set(asset.type, (result.get(asset.type) ?? 0) + 1);
-    return result;
-  }, [assets]);
-
+  const eligibleModels = useMemo(() => models.filter(isImageModel), [models]);
   const visibleAssets = useMemo(() => {
-    const needle = search.trim().toLocaleLowerCase("zh-CN");
-    return assets.filter((asset) => {
-      if (filter !== "all" && asset.type !== filter) return false;
-      if (!needle) return true;
-      return `${asset.name} ${asset.description ?? ""} ${ASSET_TYPE_META[asset.type]?.label ?? ""}`.toLocaleLowerCase("zh-CN").includes(needle);
-    });
-  }, [assets, filter, search]);
+    const needle = search.trim().toLowerCase();
+    return assets.filter(
+      (asset) =>
+        (mediaFilter === "all" || asset.mediaType === mediaFilter) &&
+        (categoryFilter === "all" || asset.category === categoryFilter) &&
+        (!needle ||
+          `${asset.name} ${asset.description ?? ""} ${MEDIA_META[asset.mediaType].label} ${CATEGORY_META[asset.category].label}`
+            .toLowerCase()
+            .includes(needle)),
+    );
+  }, [assets, mediaFilter, categoryFilter, search]);
+  const selectableAssets = (currentId?: string) =>
+    assets.filter((asset) => asset.id !== currentId);
 
-  function openUploader() {
-    setForm(EMPTY_FORM);
+  function openCreate() {
+    setEditing(null);
+    setForm(EMPTY_ASSET);
     setFile(null);
+    setSourceMode("file");
     setFormError("");
-    setUploadMode("file");
     setDirty(false);
-    setDialogOpen(true);
+    setDialog("asset");
   }
-
-  function closeUploader() {
-    if (saving) return;
-    if (dirty && !window.confirm("上传信息尚未保存，确定关闭吗？")) return;
-    setDialogOpen(false);
+  function openEdit(asset: ProjectAsset) {
+    setEditing(asset);
+    setSourceMode("url");
+    setFile(null);
+    setForm({
+      name: asset.name,
+      mediaType: asset.mediaType,
+      category: asset.category,
+      description: asset.description ?? "",
+      sourceUrl: asset.sourceUrl ?? "",
+      thumbnailUrl: asset.thumbnailUrl ?? "",
+      relatedAssetIds: asset.relations
+        .filter((r) => r.direction === "outgoing" && r.targetType === "asset")
+        .map((r) => r.targetId),
+      relatedCharacterIds: asset.relations
+        .filter(
+          (r) => r.direction === "outgoing" && r.targetType === "character",
+        )
+        .map((r) => r.targetId),
+    });
+    setFormError("");
+    setDirty(false);
+    setDialog("asset");
   }
-
+  function openGenerate() {
+    setGenerateForm({
+      ...EMPTY_GENERATE,
+      modelId: eligibleModels[0]?.id ?? "",
+    });
+    setFormError("");
+    setDirty(false);
+    setDialog("generate");
+  }
+  function closeDialog() {
+    if (saving || (dirty && !window.confirm("当前修改尚未保存，确定关闭吗？")))
+      return;
+    setDialog(null);
+  }
   function updateForm<K extends keyof AssetForm>(key: K, value: AssetForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
-    setFormError("");
     setDirty(true);
-  }
-
-  function changeUploadMode(nextMode: UploadMode) {
-    if (nextMode === uploadMode) return;
-    setUploadMode(nextMode);
     setFormError("");
-    setDirty(true);
-    if (nextMode === "file") {
-      setForm((current) => ({ ...current, sourceUrl: "", thumbnailUrl: "" }));
-    } else {
-      setFile(null);
-    }
   }
-
+  function updateGenerate<K extends keyof GenerateForm>(
+    key: K,
+    value: GenerateForm[K],
+  ) {
+    setGenerateForm((current) => ({ ...current, [key]: value }));
+    setDirty(true);
+    setFormError("");
+  }
   function selectFile(nextFile: File | null) {
     setFile(nextFile);
-    setFormError("");
     setDirty(true);
-    if (nextFile && !form.name.trim()) {
-      const fallbackName = nextFile.name.replace(/\.[^.]+$/, "");
-      setForm((current) => ({ ...current, name: fallbackName }));
-    }
+    setFormError(
+      nextFile && nextFile.size > 100 * 1024 * 1024
+        ? "单个文件不能超过 100 MB。"
+        : "",
+    );
+    if (nextFile && !form.name.trim())
+      setForm((current) => ({
+        ...current,
+        name: nextFile.name.replace(/\.[^.]+$/, ""),
+      }));
+  }
+  function toggleRelation(
+    kind: "asset" | "character",
+    targetId: string,
+    checked: boolean,
+    generation = false,
+  ) {
+    const key = kind === "asset" ? "relatedAssetIds" : "relatedCharacterIds";
+    if (generation)
+      setGenerateForm((current) => ({
+        ...current,
+        [key]: checked
+          ? [...current[key], targetId]
+          : current[key].filter((id) => id !== targetId),
+      }));
+    else
+      setForm((current) => ({
+        ...current,
+        [key]: checked
+          ? [...current[key], targetId]
+          : current[key].filter((id) => id !== targetId),
+      }));
+    setDirty(true);
   }
 
-  async function createAsset(event: React.FormEvent<HTMLFormElement>) {
+  async function saveAsset(event: React.FormEvent) {
     event.preventDefault();
-    if (!projectId) {
-      setFormError("请先选择一个项目。");
-      return;
-    }
-    if (!form.name.trim()) {
-      setFormError("请输入资产名称。");
-      nameInputRef.current?.focus();
-      return;
-    }
-    if (uploadMode === "file" && !file) {
-      setFormError("请选择要上传的文件。");
-      return;
-    }
-    if (uploadMode === "file" && file && file.size > 100 * 1024 * 1024) {
-      setFormError("单个文件不能超过 100 MB；更大的视频请等待分片上传版本。");
-      return;
-    }
-    if (uploadMode === "url" && !isHttpUrl(form.sourceUrl.trim())) {
-      setFormError("请输入有效且不含凭据的 HTTPS 外部地址。");
-      return;
-    }
-    if (form.thumbnailUrl.trim() && !isHttpUrl(form.thumbnailUrl.trim())) {
-      setFormError("缩略图地址必须是有效且不含凭据的 HTTPS 地址。");
-      return;
-    }
-
+    if (!form.name.trim()) return setFormError("请输入资产名称。");
+    if (!editing && sourceMode === "file" && !file)
+      return setFormError("请选择要上传的文件。");
+    if (
+      !editing &&
+      sourceMode === "file" &&
+      file &&
+      file.size > 100 * 1024 * 1024
+    )
+      return setFormError("单个文件不能超过 100 MB。");
+    if (!editing && sourceMode === "url" && !isHttpUrl(form.sourceUrl.trim()))
+      return setFormError("请输入有效的 HTTPS 外部地址。");
+    if (form.thumbnailUrl.trim() && !isHttpUrl(form.thumbnailUrl.trim()))
+      return setFormError("缩略图地址必须是有效的 HTTPS 地址。");
     setSaving(true);
-    setError("");
+    setFormError("");
     try {
       const endpoint = `/api/projects/${encodeURIComponent(projectId)}/assets`;
-      if (uploadMode === "file" && file) {
+      const relations = relationInputs(form);
+      if (editing) {
+        const body = {
+          name: form.name.trim(),
+          mediaType: form.mediaType,
+          category: form.category,
+          description: form.description.trim(),
+          sourceUrl: form.sourceUrl.trim() || null,
+          thumbnailUrl: form.thumbnailUrl.trim() || null,
+          relations,
+        };
+        await apiRequest(`${endpoint}/${encodeURIComponent(editing.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+      } else if (sourceMode === "file" && file) {
         const body = new FormData();
         body.set("file", file);
         body.set("name", form.name.trim());
-        body.set("type", form.type);
+        body.set("mediaType", form.mediaType);
+        body.set("category", form.category);
         body.set("description", form.description.trim());
-        body.set("metadata", JSON.stringify({ originalFileName: file.name, mimeType: file.type, size: file.size }));
-        await apiRequest<ProjectAsset>(endpoint, { method: "POST", body });
+        body.set("relations", JSON.stringify(relations));
+        await apiRequest(endpoint, { method: "POST", body });
       } else {
         const body: ProjectAssetInput = {
           name: form.name.trim(),
-          type: form.type,
+          mediaType: form.mediaType,
+          category: form.category,
           description: form.description.trim(),
           sourceUrl: form.sourceUrl.trim(),
           thumbnailUrl: form.thumbnailUrl.trim() || undefined,
           status: "ready",
-          metadata: { source: "external-url" },
+          relations,
         };
-        await apiRequest<ProjectAsset>(endpoint, { method: "POST", body: JSON.stringify(body) });
+        await apiRequest(endpoint, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
       }
-      setDialogOpen(false);
-      setDirty(false);
-      setSuccess(`资产“${form.name.trim()}”已保存到${projectName ? `「${projectName}」` : "当前项目"}。`);
+      setDialog(null);
+      setSuccess(`资产“${form.name.trim()}”已保存。`);
       await loadAssets();
-    } catch (requestError) {
-      setFormError(requestError instanceof Error ? requestError.message : "资产保存失败，请重试。");
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : "资产保存失败。");
     } finally {
       setSaving(false);
     }
   }
-
-  async function deleteAsset(asset: ProjectAsset) {
-    if (!window.confirm(`确定删除资产“${asset.name}”吗？已关联的 Agent 分析记录仍会保留引用快照。`)) return;
-    setDeletingIds((current) => {
-      const next = new Set(current);
-      next.add(asset.id);
-      return next;
-    });
-    setError("");
+  async function generateAsset(event: React.FormEvent) {
+    event.preventDefault();
+    if (!generateForm.modelId) return setFormError("请选择已配置的图像模型。");
+    if (!generateForm.name.trim() || !generateForm.prompt.trim())
+      return setFormError("请填写资产名称与提示词。");
+    setSaving(true);
+    setFormError("");
     try {
-      await apiRequest<unknown>(`/api/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(asset.id)}`, { method: "DELETE" });
-      setSuccess(`资产“${asset.name}”已删除。`);
+      await apiRequest(
+        `/api/projects/${encodeURIComponent(projectId)}/assets/generate`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...generateForm,
+            name: generateForm.name.trim(),
+            prompt: generateForm.prompt.trim(),
+            size: generateForm.size || undefined,
+            relations: relationInputs(generateForm),
+          }),
+        },
+      );
+      setDialog(null);
+      setSuccess(`AI 资产“${generateForm.name.trim()}”已生成。`);
       await loadAssets();
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "资产删除失败，请重试。");
+    } catch (reason) {
+      setFormError(
+        reason instanceof Error ? reason.message : "AI 资产生成失败。",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function deleteAsset(asset: ProjectAsset) {
+    if (!confirm(`确定删除资产“${asset.name}”吗？`)) return;
+    setDeletingIds((current) => new Set(current).add(asset.id));
+    try {
+      await apiRequest(
+        `/api/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(asset.id)}`,
+        { method: "DELETE" },
+      );
+      await loadAssets();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "资产删除失败。");
     } finally {
       setDeletingIds((current) => {
         const next = new Set(current);
@@ -326,129 +661,657 @@ export default function AssetManager({ projectId, projectName, className, refres
   }
 
   return (
-    <section className={joinClassNames(styles.moduleRoot, styles.moduleStack, className)} aria-labelledby="asset-manager-title">
+    <section
+      className={joinClassNames(
+        styles.moduleRoot,
+        styles.moduleStack,
+        className,
+      )}
+      aria-labelledby="asset-manager-title"
+    >
       <div className={styles.toolbar}>
         <div className={styles.headingBlock}>
           <span className={styles.eyebrow}>PROJECT ASSET LIBRARY</span>
-          <h2 id="asset-manager-title">项目资产库{projectName ? ` · ${projectName}` : ""}</h2>
-          <p>图片、视频、音频、3D 模型与制片资产统一入库，只显示当前项目的数据。</p>
+          <h2 id="asset-manager-title">
+            项目资产库{projectName ? ` · ${projectName}` : ""}
+          </h2>
+          <p>
+            先按介质属性管理文件，再按人物、服装、道具、场景等制作分类组织生产资产。
+          </p>
         </div>
-        <button className={styles.primaryButton} type="button" onClick={openUploader} disabled={!projectId}>
-          <Plus size={15} /> 新增资产
-        </button>
+        <div className={styles.assetHeaderActions}>
+          <button
+            className={styles.secondaryButton}
+            type="button"
+            onClick={openGenerate}
+            disabled={!projectId}
+          >
+            <WandSparkles size={15} /> AI 创建资产
+          </button>
+          <button
+            className={styles.primaryButton}
+            type="button"
+            onClick={openCreate}
+            disabled={!projectId}
+          >
+            <Plus size={15} /> 新增资产
+          </button>
+        </div>
       </div>
-
-      {error && <div className={joinClassNames(styles.notice, styles.noticeError)} role="alert"><AlertCircle size={16} /><span>{error}</span></div>}
-      {success && <div className={joinClassNames(styles.notice, styles.noticeSuccess)} role="status"><CheckCircle2 size={16} /><span>{success}</span></div>}
-
-      {!projectId ? (
-        <div className={styles.stateBox}><div><Package size={26} /><h3>请先选择项目</h3><p>资产按项目隔离，选择项目后会自动切换到对应资产库。</p></div></div>
-      ) : loading ? (
-        <div className={styles.stateBox} aria-live="polite"><div><LoaderCircle className={styles.spinner} size={25} /><h3>正在加载项目资产</h3><p>正在读取当前项目的文件和资产卡片。</p></div></div>
-      ) : error && assets.length === 0 ? (
-        <div className={styles.stateBox}><div><AlertCircle size={25} /><h3>资产库暂时不可用</h3><p>请检查网络或服务状态后重试。</p><button className={styles.secondaryButton} onClick={() => void loadAssets()}><RefreshCw size={14} /> 重新加载</button></div></div>
+      {error && (
+        <div
+          className={joinClassNames(styles.notice, styles.noticeError)}
+          role="alert"
+        >
+          <AlertCircle size={16} />
+          {error}
+        </div>
+      )}
+      {characterLoadError && (
+        <div
+          className={joinClassNames(styles.notice, styles.noticeError)}
+          role="alert"
+        >
+          <AlertCircle size={16} />
+          <span>人物关联选项加载失败：{characterLoadError}</span>
+          <button
+            className={styles.textButton}
+            type="button"
+            onClick={() => void loadCharacters()}
+          >
+            <RefreshCw size={13} /> 重试人物选项
+          </button>
+        </div>
+      )}
+      {modelLoadError && (
+        <div
+          className={joinClassNames(styles.notice, styles.noticeError)}
+          role="alert"
+        >
+          <AlertCircle size={16} />
+          <span>图像模型选项加载失败：{modelLoadError}</span>
+          <button
+            className={styles.textButton}
+            type="button"
+            onClick={() => void loadModels()}
+          >
+            <RefreshCw size={13} /> 重试模型选项
+          </button>
+        </div>
+      )}
+      {success && (
+        <div
+          className={joinClassNames(styles.notice, styles.noticeSuccess)}
+          role="status"
+        >
+          <CheckCircle2 size={16} />
+          {success}
+        </div>
+      )}
+      {loading ? (
+        <div className={styles.stateBox}>
+          <div>
+            <LoaderCircle className={styles.spinner} size={25} />
+            <h3>正在加载项目资产</h3>
+            <p>正在读取介质、制作分类与项目关系。</p>
+          </div>
+        </div>
       ) : (
         <>
-          <div className={styles.filterToolbar}>
+          <div className={styles.assetFilters}>
             <div className={styles.searchWrap}>
-              <Search size={14} aria-hidden="true" />
-              <label className={styles.srOnly} htmlFor="asset-search">搜索资产</label>
-              <input id="asset-search" className={styles.searchInput} type="search" placeholder="搜索名称、描述或类型" value={search} onChange={(event) => setSearch(event.target.value)} />
+              <Search size={14} />
+              <label className={styles.srOnly} htmlFor="asset-search">
+                搜索资产
+              </label>
+              <input
+                id="asset-search"
+                className={styles.searchInput}
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="搜索资产"
+              />
             </div>
-            <div className={styles.filterBar} aria-label="按资产类型筛选">
-              <button type="button" className={joinClassNames(styles.segmentedButton, filter === "all" && styles.segmentedButtonActive)} aria-pressed={filter === "all"} onClick={() => setFilter("all")}>全部 {assets.length}</button>
-              {ASSET_TYPES.filter((type) => (counts.get(type) ?? 0) > 0).map((type) => (
-                <button key={type} type="button" className={joinClassNames(styles.segmentedButton, filter === type && styles.segmentedButtonActive)} aria-pressed={filter === type} onClick={() => setFilter(type)}>{ASSET_TYPE_META[type].label} {counts.get(type)}</button>
-              ))}
-            </div>
-            <span className={styles.runState}>{visibleAssets.length} 项结果</span>
+            <fieldset className={styles.filterGroup}>
+              <legend className={styles.filterLegend}>介质属性</legend>
+              <div
+                className={styles.filterBar}
+                role="group"
+                aria-label="按介质属性筛选"
+              >
+                <button
+                  type="button"
+                  aria-pressed={mediaFilter === "all"}
+                  className={joinClassNames(
+                    styles.segmentedButton,
+                    mediaFilter === "all" && styles.segmentedButtonActive,
+                  )}
+                  onClick={() => setMediaFilter("all")}
+                >
+                  全部
+                </button>
+                {ASSET_MEDIA_TYPES.map((type) => (
+                  <button
+                    type="button"
+                    key={type}
+                    aria-pressed={mediaFilter === type}
+                    className={joinClassNames(
+                      styles.segmentedButton,
+                      mediaFilter === type && styles.segmentedButtonActive,
+                    )}
+                    onClick={() => setMediaFilter(type)}
+                  >
+                    {MEDIA_META[type].label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+            <fieldset className={styles.filterGroup}>
+              <legend className={styles.filterLegend}>制作分类</legend>
+              <div
+                className={styles.filterBar}
+                role="group"
+                aria-label="按制作分类筛选"
+              >
+                <button
+                  type="button"
+                  aria-pressed={categoryFilter === "all"}
+                  className={joinClassNames(
+                    styles.segmentedButton,
+                    categoryFilter === "all" && styles.segmentedButtonActive,
+                  )}
+                  onClick={() => setCategoryFilter("all")}
+                >
+                  全部
+                </button>
+                {ASSET_CATEGORIES.map((category) => (
+                  <button
+                    type="button"
+                    key={category}
+                    aria-pressed={categoryFilter === category}
+                    className={joinClassNames(
+                      styles.segmentedButton,
+                      categoryFilter === category &&
+                        styles.segmentedButtonActive,
+                    )}
+                    onClick={() => setCategoryFilter(category)}
+                  >
+                    {CATEGORY_META[category].label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
           </div>
-
-          {assets.length === 0 ? (
-            <div className={styles.stateBox}><div><Upload size={27} /><h3>当前项目还没有资产</h3><p>上传参考图、视频、音频、3D 文件，或登记外部素材地址。</p><button className={styles.primaryButton} onClick={openUploader}><Plus size={14} /> 新增第一个资产</button></div></div>
-          ) : visibleAssets.length === 0 ? (
-            <div className={styles.stateBox}><div><Search size={25} /><h3>没有匹配的资产</h3><p>尝试更换类型或清空搜索词。</p><button className={styles.secondaryButton} onClick={() => { setSearch(""); setFilter("all"); }}>清除筛选</button></div></div>
+          {!assets.length ? (
+            <div className={styles.stateBox}>
+              <div>
+                <Upload size={27} />
+                <h3>当前项目还没有资产</h3>
+                <p>
+                  上传文件、登记外部
+                  URL，或使用已配置的图像模型创建首个生产资产。
+                </p>
+                <div className={styles.assetHeaderActions}>
+                  <button
+                    type="button"
+                    className={styles.primaryButton}
+                    onClick={openCreate}
+                  >
+                    新增第一个资产
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.secondaryButton}
+                    onClick={openGenerate}
+                  >
+                    <WandSparkles size={14} /> AI 创建
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : !visibleAssets.length ? (
+            <div className={styles.stateBox}>
+              <div>
+                <Search size={25} />
+                <h3>没有匹配的资产</h3>
+                <p>尝试清空搜索词或切换介质、制作分类。</p>
+              </div>
+            </div>
           ) : (
             <div className={styles.assetGrid}>
-              {visibleAssets.map((asset) => {
-                const meta = ASSET_TYPE_META[asset.type] ?? ASSET_TYPE_META.other;
-                const isDeleting = deletingIds.has(asset.id);
-                return (
-                  <article className={styles.assetCard} key={asset.id}>
-                    <AssetPreview asset={asset} />
-                    <div className={styles.assetMenu}>
-                      <button className={styles.iconButton} type="button" aria-label={`删除资产 ${asset.name}`} onClick={() => void deleteAsset(asset)} disabled={isDeleting}>{isDeleting ? <LoaderCircle className={styles.spinner} size={14} /> : <Trash2 size={14} />}</button>
+              {visibleAssets.map((asset) => (
+                <article className={styles.assetCard} key={asset.id}>
+                  <AssetPreview asset={asset} />
+                  <div className={styles.assetMenu}>
+                    <button
+                      type="button"
+                      className={styles.iconButton}
+                      aria-label={`编辑资产 ${asset.name}`}
+                      onClick={() => openEdit(asset)}
+                      disabled={deletingIds.has(asset.id)}
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.iconButton}
+                      aria-label={`删除资产 ${asset.name}`}
+                      onClick={() => void deleteAsset(asset)}
+                      disabled={deletingIds.has(asset.id)}
+                    >
+                      {deletingIds.has(asset.id) ? (
+                        <LoaderCircle className={styles.spinner} size={14} />
+                      ) : (
+                        <Trash2 size={14} />
+                      )}
+                    </button>
+                  </div>
+                  <div className={styles.assetBody}>
+                    <h3>{asset.name}</h3>
+                    <div className={styles.assetDimensions}>
+                      <span className={styles.sourceBadge}>
+                        {MEDIA_META[asset.mediaType].label}
+                      </span>
+                      <span className={styles.levelBadge}>
+                        {CATEGORY_META[asset.category].label}
+                      </span>
                     </div>
-                    <div className={styles.assetBody}>
-                      <h3 title={asset.name}>{asset.name}</h3>
-                      <p>{asset.description || `${meta.label}资产 · 暂无描述`}</p>
-                      <div className={styles.assetFoot}>
-                        <span className={asset.status === "ready" || asset.status === "approved" ? styles.statusBadge : joinClassNames(styles.statusBadge, styles.statusBadgeWarning)}>{asset.status || "已入库"}</span>
-                        <time dateTime={asset.updatedAt || asset.createdAt}>{formatCompactDate(asset.updatedAt || asset.createdAt)}</time>
+                    <p>{asset.description || "暂无描述"}</p>
+                    {asset.relations.length > 0 && (
+                      <div className={styles.relationChips}>
+                        {asset.relations.slice(0, 4).map((relation) => (
+                          <span key={`${relation.id}:${relation.direction}`}>
+                            {relation.direction === "incoming"
+                              ? "被关联"
+                              : "关联"}{" "}
+                            · {relation.targetName}
+                          </span>
+                        ))}
+                        {asset.relations.length > 4 && (
+                          <span>另有 {asset.relations.length - 4} 条</span>
+                        )}
                       </div>
+                    )}
+                    <div className={styles.assetFoot}>
+                      <span className={styles.statusBadge}>{asset.status}</span>
+                      <time>
+                        {formatCompactDate(asset.updatedAt || asset.createdAt)}
+                      </time>
                     </div>
-                  </article>
-                );
-              })}
+                  </div>
+                </article>
+              ))}
             </div>
           )}
         </>
       )}
-
-      {dialogOpen && (
-        <div className={styles.dialogBackdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeUploader(); }}>
-          <div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="asset-dialog-title">
-            <form onSubmit={createAsset} noValidate>
+      {dialog === "asset" && (
+        <div
+          className={styles.dialogBackdrop}
+          role="presentation"
+          onMouseDown={(event) =>
+            event.target === event.currentTarget && closeDialog()
+          }
+        >
+          <div
+            className={styles.dialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="asset-dialog-title"
+          >
+            <form onSubmit={saveAsset}>
               <header className={styles.dialogHeader}>
-                <div><h2 id="asset-dialog-title">新增项目资产</h2><p>将文件上传到项目存储，或登记可访问的外部地址。</p></div>
-                <button className={styles.iconButton} type="button" aria-label="关闭资产表单" onClick={closeUploader} disabled={saving}><X size={16} /></button>
+                <div>
+                  <h2 id="asset-dialog-title">
+                    {editing ? "编辑项目资产" : "新增项目资产"}
+                  </h2>
+                  <p>介质属性与制作分类彼此独立，可关联项目人物和其他资产。</p>
+                </div>
+                <button
+                  className={styles.iconButton}
+                  type="button"
+                  aria-label="关闭资产表单"
+                  onClick={closeDialog}
+                  disabled={saving}
+                >
+                  <X size={16} />
+                </button>
               </header>
               <div className={styles.dialogBody}>
-                <div className={styles.uploadMode} role="group" aria-label="资产来源">
-                  <button type="button" aria-pressed={uploadMode === "file"} onClick={() => changeUploadMode("file")}><Upload size={15} /> 上传文件</button>
-                  <button type="button" aria-pressed={uploadMode === "url"} onClick={() => changeUploadMode("url")}><Link2 size={15} /> 外部 URL</button>
-                </div>
-                <div className={styles.formGrid}>
+                {!editing && (
+                  <div className={styles.uploadMode}>
+                    <button
+                      type="button"
+                      aria-pressed={sourceMode === "file"}
+                      onClick={() => setSourceMode("file")}
+                      disabled={saving}
+                    >
+                      <Upload size={15} /> 上传文件
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={sourceMode === "url"}
+                      onClick={() => setSourceMode("url")}
+                      disabled={saving}
+                    >
+                      <Link2 size={15} /> 外部 URL
+                    </button>
+                  </div>
+                )}
+                <fieldset
+                  className={joinClassNames(styles.formGrid, styles.formShell)}
+                  disabled={saving}
+                >
                   <div className={styles.field}>
-                    <label htmlFor="asset-name">资产名称<span className={styles.requiredMark}>*</span></label>
-                    <input ref={nameInputRef} id="asset-name" value={form.name} onChange={(event) => updateForm("name", event.target.value)} placeholder="例如：雾港旧码头夜景" />
+                    <label htmlFor="asset-name">资产名称 *</label>
+                    <input
+                      ref={nameInputRef}
+                      id="asset-name"
+                      value={form.name}
+                      onChange={(event) =>
+                        updateForm("name", event.target.value)
+                      }
+                    />
                   </div>
                   <div className={styles.field}>
-                    <label htmlFor="asset-type">资产类型<span className={styles.requiredMark}>*</span></label>
-                    <select id="asset-type" value={form.type} onChange={(event) => updateForm("type", event.target.value as AssetType)}>
-                      {ASSET_TYPES.map((type) => <option value={type} key={type}>{ASSET_TYPE_META[type].label}</option>)}
+                    <label htmlFor="asset-media-type">介质属性 *</label>
+                    <select
+                      id="asset-media-type"
+                      value={form.mediaType}
+                      onChange={(event) =>
+                        updateForm(
+                          "mediaType",
+                          event.target.value as AssetMediaType,
+                        )
+                      }
+                    >
+                      {ASSET_MEDIA_TYPES.map((type) => (
+                        <option key={type} value={type}>
+                          {MEDIA_META[type].label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="asset-category">制作分类 *</label>
+                    <select
+                      id="asset-category"
+                      value={form.category}
+                      onChange={(event) =>
+                        updateForm(
+                          "category",
+                          event.target.value as AssetCategory,
+                        )
+                      }
+                    >
+                      {ASSET_CATEGORIES.map((category) => (
+                        <option key={category} value={category}>
+                          {CATEGORY_META[category].label}
+                        </option>
+                      ))}
                     </select>
                   </div>
                   <div className={styles.fieldFull}>
                     <label htmlFor="asset-description">用途与描述</label>
-                    <textarea id="asset-description" value={form.description} onChange={(event) => updateForm("description", event.target.value)} placeholder="记录画面内容、使用场次、版本要求或版权备注" />
+                    <textarea
+                      id="asset-description"
+                      value={form.description}
+                      onChange={(event) =>
+                        updateForm("description", event.target.value)
+                      }
+                    />
                   </div>
-                  {uploadMode === "file" ? (
-                    <label className={joinClassNames(styles.dropZone, styles.fieldFull)}>
-                      <input type="file" onChange={(event) => selectFile(event.target.files?.[0] ?? null)} />
+                  {!editing && sourceMode === "file" ? (
+                    <label
+                      className={joinClassNames(
+                        styles.dropZone,
+                        styles.fieldFull,
+                      )}
+                    >
+                      <input
+                        type="file"
+                        onChange={(event) =>
+                          selectFile(event.target.files?.[0] ?? null)
+                        }
+                      />
                       <Upload size={22} />
-                      <strong>{file ? "已选择文件" : "点击选择要上传的文件"}</strong>
-                      <span>支持图片、视频、音频、文档与常见 3D 文件</span>
-                      {file && <span className={styles.selectedFile}>{file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB</span>}
+                      <strong>{file?.name || "点击选择文件"}</strong>
                     </label>
                   ) : (
                     <>
                       <div className={styles.fieldFull}>
-                        <label htmlFor="asset-source-url">外部地址<span className={styles.requiredMark}>*</span></label>
-                        <input id="asset-source-url" type="url" value={form.sourceUrl} onChange={(event) => updateForm("sourceUrl", event.target.value)} placeholder="https://…" autoCapitalize="none" autoCorrect="off" />
+                        <label htmlFor="asset-source-url">外部地址</label>
+                        <input
+                          id="asset-source-url"
+                          value={form.sourceUrl}
+                          onChange={(event) =>
+                            updateForm("sourceUrl", event.target.value)
+                          }
+                        />
                       </div>
                       <div className={styles.fieldFull}>
                         <label htmlFor="asset-thumbnail-url">缩略图地址</label>
-                        <input id="asset-thumbnail-url" type="url" value={form.thumbnailUrl} onChange={(event) => updateForm("thumbnailUrl", event.target.value)} placeholder="可选，用于视频、音频或 3D 模型封面" autoCapitalize="none" autoCorrect="off" />
+                        <input
+                          id="asset-thumbnail-url"
+                          value={form.thumbnailUrl}
+                          onChange={(event) =>
+                            updateForm("thumbnailUrl", event.target.value)
+                          }
+                        />
                       </div>
                     </>
                   )}
-                </div>
-                {formError && <div className={joinClassNames(styles.notice, styles.noticeError)} role="alert" style={{ marginTop: 14 }}><AlertCircle size={16} /><span>{formError}</span></div>}
+                  <RelationFields
+                    characters={characters}
+                    assets={selectableAssets(editing?.id)}
+                    value={form}
+                    onToggle={(kind, targetId, checked) =>
+                      toggleRelation(kind, targetId, checked)
+                    }
+                  />
+                </fieldset>
+                {formError && (
+                  <div
+                    className={joinClassNames(
+                      styles.notice,
+                      styles.noticeError,
+                    )}
+                    role="alert"
+                  >
+                    {formError}
+                  </div>
+                )}
               </div>
               <footer className={styles.dialogFooter}>
-                <button className={styles.secondaryButton} type="button" onClick={closeUploader} disabled={saving}>取消</button>
-                <button className={styles.primaryButton} type="submit" disabled={saving}>{saving ? <LoaderCircle className={styles.spinner} size={14} /> : <Upload size={14} />}{saving ? "正在保存…" : "保存资产"}</button>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={closeDialog}
+                  disabled={saving}
+                >
+                  取消
+                </button>
+                <button
+                  className={styles.primaryButton}
+                  type="submit"
+                  disabled={saving}
+                >
+                  {saving ? (
+                    <LoaderCircle className={styles.spinner} size={14} />
+                  ) : (
+                    <Upload size={14} />
+                  )}
+                  保存资产
+                </button>
+              </footer>
+            </form>
+          </div>
+        </div>
+      )}
+      {dialog === "generate" && (
+        <div
+          className={styles.dialogBackdrop}
+          role="presentation"
+          onMouseDown={(event) =>
+            event.target === event.currentTarget && closeDialog()
+          }
+        >
+          <div
+            className={styles.dialog}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="generate-asset-title"
+          >
+            <form onSubmit={generateAsset}>
+              <header className={styles.dialogHeader}>
+                <div>
+                  <h2 id="generate-asset-title">AI 创建资产</h2>
+                  <p>生成成功后会自动下载到项目媒体存储并建立资产记录。</p>
+                </div>
+                <button
+                  className={styles.iconButton}
+                  type="button"
+                  aria-label="关闭 AI 创建资产"
+                  onClick={closeDialog}
+                  disabled={saving}
+                >
+                  <X size={16} />
+                </button>
+              </header>
+              <div className={styles.dialogBody}>
+                <fieldset
+                  className={joinClassNames(styles.formGrid, styles.formShell)}
+                  disabled={saving}
+                >
+                  <div className={styles.fieldFull}>
+                    <label htmlFor="generate-model">图像模型 *</label>
+                    <select
+                      id="generate-model"
+                      value={generateForm.modelId}
+                      onChange={(event) =>
+                        updateGenerate("modelId", event.target.value)
+                      }
+                    >
+                      <option value="">请选择模型</option>
+                      {eligibleModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name}
+                        </option>
+                      ))}
+                    </select>
+                    {!eligibleModels.length && (
+                      <small className={styles.fieldError}>
+                        没有已启用、配置密钥且支持图像生成的模型。
+                      </small>
+                    )}
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="generate-name">资产名称 *</label>
+                    <input
+                      ref={nameInputRef}
+                      id="generate-name"
+                      value={generateForm.name}
+                      onChange={(event) =>
+                        updateGenerate("name", event.target.value)
+                      }
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="generate-category">制作分类 *</label>
+                    <select
+                      id="generate-category"
+                      value={generateForm.category}
+                      onChange={(event) =>
+                        updateGenerate(
+                          "category",
+                          event.target.value as AssetCategory,
+                        )
+                      }
+                    >
+                      {ASSET_CATEGORIES.map((category) => (
+                        <option key={category} value={category}>
+                          {CATEGORY_META[category].label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className={styles.fieldFull}>
+                    <label htmlFor="generate-prompt">生成提示词 *</label>
+                    <textarea
+                      id="generate-prompt"
+                      value={generateForm.prompt}
+                      onChange={(event) =>
+                        updateGenerate("prompt", event.target.value)
+                      }
+                    />
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="generate-ratio">画幅</label>
+                    <select
+                      id="generate-ratio"
+                      value={generateForm.aspectRatio}
+                      onChange={(event) =>
+                        updateGenerate("aspectRatio", event.target.value)
+                      }
+                    >
+                      {["1:1", "9:16", "16:9", "3:4", "4:3"].map((ratio) => (
+                        <option key={ratio}>{ratio}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className={styles.field}>
+                    <label htmlFor="generate-size">自定义尺寸</label>
+                    <input
+                      id="generate-size"
+                      placeholder="例如 1024x1024"
+                      value={generateForm.size}
+                      onChange={(event) =>
+                        updateGenerate("size", event.target.value)
+                      }
+                    />
+                  </div>
+                  <RelationFields
+                    characters={characters}
+                    assets={selectableAssets()}
+                    value={generateForm}
+                    onToggle={(kind, targetId, checked) =>
+                      toggleRelation(kind, targetId, checked, true)
+                    }
+                  />
+                </fieldset>
+                {formError && (
+                  <div
+                    className={joinClassNames(
+                      styles.notice,
+                      styles.noticeError,
+                    )}
+                    role="alert"
+                  >
+                    {formError}
+                  </div>
+                )}
+              </div>
+              <footer className={styles.dialogFooter}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={closeDialog}
+                  disabled={saving}
+                >
+                  取消
+                </button>
+                <button
+                  className={styles.primaryButton}
+                  type="submit"
+                  disabled={saving || !eligibleModels.length}
+                >
+                  {saving ? (
+                    <LoaderCircle className={styles.spinner} size={14} />
+                  ) : (
+                    <Sparkles size={14} />
+                  )}
+                  生成并入库
+                </button>
               </footer>
             </form>
           </div>

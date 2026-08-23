@@ -72,14 +72,42 @@ assert(createdModel.apiKeyMasked === null, "short key must not be echoed in the 
 const form = new FormData();
 form.set("file", new File([new Uint8Array(2048).fill(7)], "integration.bin", { type: "application/octet-stream" }));
 form.set("name", "接口联调资产");
-form.set("type", "other");
+form.set("mediaType", "other");
+form.set("category", "reference");
 const assetCreated = await request(`/api/projects/${projectTwo.id}/assets`, { method: "POST", body: form });
 assert(assetCreated.response.status === 201, `asset upload: ${assetCreated.response.status} ${JSON.stringify(assetCreated.payload)}`);
 const asset = assetCreated.payload.data.asset;
+assert(asset.mediaType === "other" && asset.category === "reference", "asset dimensions were not persisted independently");
 const content = await fetch(`${base}/api/projects/${projectTwo.id}/assets/${asset.id}/content`, { headers: userA });
 assert(content.status === 200, `asset content: ${content.status}`);
 assert(Number(content.headers.get("content-length")) === 2048, "R2 content size mismatch");
 assert((await content.arrayBuffer()).byteLength === 2048, "R2 response body size mismatch");
+
+const relatedAssetCreated = await request(`/api/projects/${projectTwo.id}/assets`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    name: "关联资产联调",
+    mediaType: "image",
+    category: "storyboard",
+    sourceUrl: "https://example.com/storyboard.png",
+    relatedAssetIds: [asset.id],
+  }),
+});
+assert(relatedAssetCreated.response.status === 201, `related asset create: ${relatedAssetCreated.response.status}`);
+const relatedAsset = relatedAssetCreated.payload.data.asset;
+assert(relatedAsset.relations.some((relation) => relation.targetId === asset.id && relation.direction === "outgoing"), "outgoing asset relation was not persisted");
+const baseAssetAfterRelation = await request(`/api/projects/${projectTwo.id}/assets/${asset.id}`);
+assert(baseAssetAfterRelation.payload.data.asset.relations.some((relation) => relation.targetId === relatedAsset.id && relation.direction === "incoming"), "incoming asset relation was not enriched");
+
+const crossProjectAsset = bootstrapA.payload.data.assets[0];
+assert(crossProjectAsset, "expected a seeded asset in the first project");
+const isolatedRelation = await request(`/api/projects/${projectTwo.id}/assets`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ name: "跨项目关系应失败", mediaType: "image", category: "reference", sourceUrl: "https://example.com/reference.png", relatedAssetIds: [crossProjectAsset.id] }),
+});
+assert(isolatedRelation.response.status === 400, `cross-project asset relation should be 400, got ${isolatedRelation.response.status}`);
 
 const seedModel = switched.payload.data.models.find((model) => !model.hasApiKey);
 assert(seedModel, "expected an unconfigured seed model");
@@ -99,6 +127,8 @@ assert(runs.payload.data.agentRuns.some((run) => run.id === runId && run.status 
 
 const assetDeleted = await request(`/api/projects/${projectTwo.id}/assets/${asset.id}`, { method: "DELETE" });
 assert(assetDeleted.response.status === 204, `asset delete: ${assetDeleted.response.status}`);
+const relatedAssetDeleted = await request(`/api/projects/${projectTwo.id}/assets/${relatedAsset.id}`, { method: "DELETE" });
+assert(relatedAssetDeleted.response.status === 204, `related asset delete: ${relatedAssetDeleted.response.status}`);
 const modelDeleted = await request(`/api/models/${createdModel.id}`, { method: "DELETE" });
 assert(modelDeleted.response.status === 204, `model delete: ${modelDeleted.response.status}`);
 

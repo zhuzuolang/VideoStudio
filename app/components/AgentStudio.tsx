@@ -426,7 +426,7 @@ export default function AgentStudio({
                   {assets.map((asset) => (
                     <label className={styles.checkCard} key={asset.id}>
                       <input type="checkbox" checked={sources.assetIds.includes(asset.id)} onChange={() => setSources((current) => ({ ...current, assetIds: toggleId(current.assetIds, asset.id) }))} disabled={submitting} />
-                      <span><b><Boxes size={12} /> {asset.name}</b><small>{asset.type} · {asset.status || "已入库"}</small></span>
+                      <span><b><Boxes size={12} /> {asset.name}</b><small>{asset.mediaType} · {asset.category} · {asset.status || "已入库"}</small></span>
                     </label>
                   ))}
                 </div>

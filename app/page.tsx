@@ -175,10 +175,17 @@ const viewCopy: Record<ViewId, { kicker: string; title: string; description: str
 
 function projectProgress(data: WorkspaceBootstrap): number {
   const story = data.story as StoryRecord | null;
+  const storyHasContent = Boolean(story && (
+    story.logline?.trim() || story.synopsis?.trim() || story.worldview?.trim() || story.coreConflict?.trim()
+    || story.themes?.some((theme) => theme.trim()) || story.styleReference?.trim() || story.storyBible?.trim()
+  ));
+  const authoredScripts = data.scripts.filter((script) => Boolean(
+    String(script.bodyText ?? script.content ?? "").trim() || script.scenes.length > 0,
+  ));
   const checks = [
-    Boolean(story?.logline),
+    storyHasContent,
     data.characters.length > 0,
-    data.scripts.length > 0,
+    authoredScripts.length > 0,
     data.scripts.some((script) => script.scenes.length > 0),
     data.assets.length > 0,
     data.agentRuns.some((run) => run.status === "completed"),
@@ -189,16 +196,23 @@ function projectProgress(data: WorkspaceBootstrap): number {
 function stageMeta(item: NavItem, data: WorkspaceBootstrap): { value: string; progress: number } {
   const story = data.story as StoryRecord | null;
   const scenes = data.scripts.flatMap((script) => script.scenes);
+  const storyHasContent = Boolean(story && (
+    story.logline?.trim() || story.synopsis?.trim() || story.worldview?.trim() || story.coreConflict?.trim()
+    || story.themes?.some((theme) => theme.trim()) || story.styleReference?.trim() || story.storyBible?.trim()
+  ));
+  const authoredScripts = data.scripts.filter((script) => Boolean(String(script.bodyText ?? script.content ?? "").trim() || script.scenes.length > 0));
+  const visualAssetCount = data.assets.filter((asset) => ["image", "video"].includes(asset.mediaType)).length;
+  const deliveryAssetCount = data.assets.filter((asset) => ["video", "audio"].includes(asset.mediaType)).length;
   switch (item.id) {
-    case "overview": return { value: `${projectProgress(data)}%`, progress: projectProgress(data) };
-    case "story": return { value: story?.status === "locked" ? "已锁定" : "编辑中", progress: story?.logline ? 88 : 20 };
+    case "overview": return { value: "项目完整度", progress: projectProgress(data) };
+    case "story": return { value: storyHasContent ? story?.status === "locked" ? "已锁定" : "编辑中" : "未开始", progress: storyHasContent ? story?.status === "locked" ? 100 : 88 : 0 };
     case "characters": return { value: `${data.characters.length} 人`, progress: Math.min(100, data.characters.length * 25) };
-    case "scripts": return { value: `${data.scripts.length} 份`, progress: Math.min(100, data.scripts.length * 30) };
+    case "scripts": return { value: `${data.scripts.length} 份`, progress: Math.min(100, authoredScripts.length * 30) };
     case "breakdown": return { value: `${scenes.length} 场`, progress: scenes.length ? 65 : 0 };
     case "assets": return { value: `${data.assets.length} 项`, progress: Math.min(100, data.assets.length * 10) };
-    case "shots": return { value: `${data.assets.filter((asset) => asset.type === "image" || asset.type === "video").length} 个`, progress: Math.min(100, data.assets.filter((asset) => asset.type === "image" || asset.type === "video").length * 14) };
+    case "shots": return { value: `${visualAssetCount} 个`, progress: Math.min(100, visualAssetCount * 14) };
     case "agent": return { value: `${data.agentRuns.length} 次`, progress: data.agentRuns.length ? 55 : 0 };
-    case "delivery": return { value: `${data.assets.filter((asset) => asset.type === "video" || asset.type === "audio").length} 项`, progress: Math.min(100, data.assets.filter((asset) => asset.type === "video" || asset.type === "audio").length * 18) };
+    case "delivery": return { value: `${deliveryAssetCount} 项`, progress: Math.min(100, deliveryAssetCount * 18) };
     default: return { value: `${data.models.length} 个`, progress: data.models.some((model) => model.hasApiKey) ? 100 : 40 };
   }
 }
@@ -224,7 +238,7 @@ function OverviewView({ data, navigate, onOpenRun }: { data: WorkspaceBootstrap;
       <section className="metric-grid">
         <article className="metric-card metric-card-accent"><span>项目完整度</span><strong>{projectProgress(data)}%</strong><div className="mini-progress"><i style={{ width: `${projectProgress(data)}%` }} /></div></article>
         <article className="metric-card"><span>数据库内容</span><strong>{episodes.length}<small>集 · {data.scripts.length} 份剧本</small></strong><p>所有内容已按项目隔离保存</p></article>
-        <article className="metric-card"><span>多媒体资产</span><strong>{data.assets.length}<small>项</small></strong><p>{new Set(data.assets.map((asset) => asset.type)).size} 种资产类型</p></article>
+        <article className="metric-card"><span>多媒体资产</span><strong>{data.assets.length}<small>项</small></strong><p>{new Set(data.assets.map((asset) => asset.mediaType)).size} 种介质 · {new Set(data.assets.map((asset) => asset.category)).size} 类制作资产</p></article>
         <article className="metric-card"><span>可用模型</span><strong>{readyModels.length}<small>个</small></strong><p>{completedRuns.length} 次真实分析已完成</p></article>
       </section>
 
@@ -389,16 +403,103 @@ function CharactersView({ projectId, characters, onSaved }: { projectId: string;
   );
 }
 
-function ScriptsView({ scripts, onOpenAgent }: { scripts: ProjectScript[]; onOpenAgent: () => void }) {
+function ScriptsView({ projectId, episodes, scripts, onOpenAgent, onSaved }: { projectId: string; episodes: EpisodeRecord[]; scripts: ProjectScript[]; onOpenAgent: () => void; onSaved: () => Promise<void> }) {
   const [selectedId, setSelectedId] = useState(scripts[0]?.id ?? "");
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [message, setMessage] = useState("");
+  const [form, setForm] = useState({ title: "", episodeId: "", bodyText: "" });
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const hasDraftRef = useRef(false);
+  hasDraftRef.current = Boolean(form.title.trim() || form.episodeId || form.bodyText.trim());
   const effectiveSelectedId = scripts.some((item) => item.id === selectedId) ? selectedId : scripts[0]?.id ?? "";
   const script = scripts.find((item) => item.id === effectiveSelectedId) ?? scripts[0];
   const scenes = (script?.scenes ?? []) as SceneRecord[];
-  if (!script) return <div className="platform-state"><FileText size={24} /><div><b>当前项目还没有剧本</b><span>可从分集大纲创建第一份剧本。</span></div></div>;
+
+  const resetForm = useCallback(() => {
+    setForm({ title: "", episodeId: "", bodyText: "" });
+    setFormError("");
+  }, []);
+
+  const closeDialog = useCallback(() => {
+    if (saving) return;
+    if (hasDraftRef.current && !window.confirm("放弃未保存的剧本草稿？")) return;
+    setDialogOpen(false);
+    resetForm();
+  }, [resetForm, saving]);
+
+  useEffect(() => {
+    if (!dialogOpen) return;
+    const focusTimer = window.setTimeout(() => titleInputRef.current?.focus(), 0);
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) closeDialog();
+    }
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [closeDialog, dialogOpen, saving]);
+
+  function openCreateDialog() {
+    resetForm();
+    setMessage("");
+    setDialogOpen(true);
+  }
+
+  async function createScript(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving) return;
+    if (!form.title.trim()) {
+      setFormError("请输入剧本标题。");
+      titleInputRef.current?.focus();
+      return;
+    }
+    setSaving(true);
+    setFormError("");
+    try {
+      const result = await apiRequest<{ script: ProjectScript }>(`/api/projects/${encodeURIComponent(projectId)}/scripts`, {
+        method: "POST",
+        body: JSON.stringify({ title: form.title.trim(), episodeId: form.episodeId || null, bodyText: form.bodyText.trim() }),
+      });
+      setSelectedId(result.script.id);
+      setDialogOpen(false);
+      resetForm();
+      setMessage("剧本已创建，正在刷新剧本列表。");
+      try {
+        await onSaved();
+        setMessage("剧本已保存到当前项目。");
+      } catch {
+        setMessage("剧本已保存，但列表刷新失败；请使用顶栏刷新按钮重试。");
+      }
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : "剧本创建失败，请重试。");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
-    <div className="script-workspace">
-      <section className="surface scene-navigator"><div className="section-heading"><div><span className="section-kicker">DATABASE SCRIPTS</span><h2>剧本</h2></div><span className="count-badge">{scripts.length}</span></div><div className="scene-list">{scripts.map((item) => <button key={item.id} className={item.id === script.id ? "active" : ""} onClick={() => setSelectedId(item.id)}><span className="scene-id">v{String(item.version ?? 1)}</span><span><b>{item.title}</b><small>{item.status} · {item.scenes.length} 场</small></span><i className={item.status === "review" ? "review" : ""} /></button>)}</div></section>
-      <section className="script-paper"><div className="paper-toolbar"><span><Database size={15} /> {script.title} · v{String(script.version ?? 1)}</span><button className="quiet-button" onClick={onOpenAgent}><Sparkles size={14} /> 交给 Agent</button></div><article className="screenplay"><p className="scene-heading-line">{scenes[0]?.heading || script.title}</p><p className="action-line">{scenes[0]?.action || String(script.bodyText ?? script.content ?? "尚未填写剧本正文。")}</p>{scenes[0]?.dialogue?.map((line, index) => <div className="dialogue-block" key={`${line.character}-${index}`}><p className="speaker-line">{line.character}</p><p className="dialogue-line">{line.line}</p></div>)}<div className="script-note"><Database size={15} /><span><b>持久化状态</b>正文、版本与 {scenes.length} 个场次已保存在当前项目中。</span></div></article><footer className="paper-footer"><span>{scenes.reduce((total, scene) => total + Number(scene.durationSeconds ?? 0), 0)} 秒预估时长</span><span>{script.status}</span></footer></section>
+    <div className="view-stack">
+      <div className="view-toolbar script-create-toolbar"><div><Database size={15} /><span>{scripts.length} 份剧本保存在当前项目</span></div><button type="button" className="primary-button" onClick={openCreateDialog} disabled={saving}><Plus size={15} /> 新建剧本</button></div>
+      {message && <div className="inline-message" role="status">{message}</div>}
+      {script ? <div className="script-workspace">
+        <section className="surface scene-navigator"><div className="section-heading"><div><span className="section-kicker">DATABASE SCRIPTS</span><h2>剧本</h2></div><span className="count-badge">{scripts.length}</span></div><div className="scene-list">{scripts.map((item) => <button key={item.id} className={item.id === script.id ? "active" : ""} onClick={() => setSelectedId(item.id)}><span className="scene-id">v{String(item.version ?? 1)}</span><span><b>{item.title}</b><small>{item.status} · {item.scenes.length} 场</small></span><i className={item.status === "review" ? "review" : ""} /></button>)}</div></section>
+        <section className="script-paper"><div className="paper-toolbar"><span><Database size={15} /> {script.title} · v{String(script.version ?? 1)}</span><button className="quiet-button" onClick={onOpenAgent}><Sparkles size={14} /> 交给 Agent</button></div><article className="screenplay"><p className="scene-heading-line">{scenes[0]?.heading || script.title}</p><p className="action-line">{scenes[0]?.action || String(script.bodyText ?? script.content ?? "尚未填写剧本正文。")}</p>{scenes[0]?.dialogue?.map((line, index) => <div className="dialogue-block" key={`${line.character}-${index}`}><p className="speaker-line">{line.character}</p><p className="dialogue-line">{line.line}</p></div>)}<div className="script-note"><Database size={15} /><span><b>持久化状态</b>正文、版本与 {scenes.length} 个场次已保存在当前项目中。</span></div></article><footer className="paper-footer"><span>{scenes.reduce((total, scene) => total + Number(scene.durationSeconds ?? 0), 0)} 秒预估时长</span><span>{script.status}</span></footer></section>
+      </div> : <div className="platform-state script-empty-state"><FileText size={24} /><div><b>当前项目还没有剧本</b><span>创建第一份剧本，可立即填写正文，也可以稍后补充场次。</span><button type="button" className="primary-button" onClick={openCreateDialog}><Plus size={14} /> 创建第一份剧本</button></div></div>}
+      {dialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDialog(); }}>
+        <form className="modal-card script-create-modal" role="dialog" aria-modal="true" aria-labelledby="script-create-dialog-title" aria-busy={saving} onSubmit={createScript}>
+          <div className="modal-head"><div><span className="section-kicker">NEW SCRIPT</span><h2 id="script-create-dialog-title">新建剧本</h2><p>先建立剧本记录，之后可继续添加场次并交给 Agent 分析。</p></div><button type="button" className="icon-button" aria-label="关闭" onClick={closeDialog} disabled={saving}><X size={17} /></button></div>
+          <fieldset className="modal-fields" disabled={saving}>
+            <label className="wide"><span>剧本标题 *</span><input ref={titleInputRef} required value={form.title} onChange={(event) => { setForm((current) => ({ ...current, title: event.target.value })); setFormError(""); }} placeholder="例如：第 1 集 · 雾港来信" /></label>
+            <label className="wide"><span>关联分集（可选）</span><select value={form.episodeId} onChange={(event) => setForm((current) => ({ ...current, episodeId: event.target.value }))}><option value="">不关联分集</option>{episodes.map((episode) => <option key={episode.id} value={episode.id}>第 {episode.episodeNo} 集 · {episode.title}</option>)}</select></label>
+            <label className="wide"><span>剧本正文（可选）</span><textarea rows={11} value={form.bodyText} onChange={(event) => setForm((current) => ({ ...current, bodyText: event.target.value }))} placeholder="可直接粘贴剧本正文，留空则只创建剧本记录。" /></label>
+          </fieldset>
+          {formError && <div className="form-error" role="alert"><AlertCircle size={14} />{formError}</div>}
+          <div className="modal-actions"><button type="button" className="quiet-button" onClick={closeDialog} disabled={saving}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} {saving ? "正在创建…" : "创建剧本"}</button></div>
+        </form>
+      </div>}
     </div>
   );
 }
@@ -411,14 +512,14 @@ function BreakdownView({ scripts }: { scripts: ProjectScript[] }) {
 }
 
 function ShotsView({ scripts, assets, onAssets }: { scripts: ProjectScript[]; assets: ProjectAsset[]; onAssets: () => void }) {
-  const visualAssets = assets.filter((asset) => asset.type === "image" || asset.type === "video" || asset.type === "model3d" || asset.type === "scene");
+  const visualAssets = assets.filter((asset) => ["image", "video", "model3d"].includes(asset.mediaType) || asset.category === "scene");
   const scenes = scripts.flatMap((script) => script.scenes as SceneRecord[]);
   const icons: Record<string, LucideIcon> = { image: ImageIcon, video: Video, model3d: Layers3, scene: Clapperboard };
-  return <div className="view-stack"><section className="previz-bar"><div className="play-button"><Clapperboard size={18} /></div><div><span className="section-kicker">PREVIS SOURCES</span><h2>{scenes.length} 场剧本 · {visualAssets.length} 项视觉资产</h2></div><div className="previz-time"><b>{visualAssets.length}</b><span>可用素材</span></div><div className="previz-line"><i style={{ width: `${Math.min(100, visualAssets.length * 18)}%` }} /></div><button className="quiet-button" onClick={onAssets}><Plus size={15} /> 添加素材</button></section><section className="visual-source-grid">{visualAssets.map((asset) => { const Icon = icons[asset.type] ?? Boxes; return <article key={asset.id}><div className={`visual-source-preview type-${asset.type}`}>{asset.thumbnailUrl || asset.sourceUrl ? <img src={asset.thumbnailUrl || asset.sourceUrl || ""} alt="" /> : <Icon size={28} />}<span>{asset.type.toUpperCase()}</span></div><div><b>{asset.name}</b><small>{asset.description || "暂无描述"}</small></div></article>; })}{visualAssets.length === 0 && <button className="add-character" onClick={onAssets}><Plus size={24} /><b>添加首个视觉资产</b><span>支持图片、视频、3D 模型和场景资产</span></button>}</section></div>;
+  return <div className="view-stack"><section className="previz-bar"><div className="play-button"><Clapperboard size={18} /></div><div><span className="section-kicker">PREVIS SOURCES</span><h2>{scenes.length} 场剧本 · {visualAssets.length} 项视觉资产</h2></div><div className="previz-time"><b>{visualAssets.length}</b><span>可用素材</span></div><div className="previz-line"><i style={{ width: `${Math.min(100, visualAssets.length * 18)}%` }} /></div><button className="quiet-button" onClick={onAssets}><Plus size={15} /> 添加素材</button></section><section className="visual-source-grid">{visualAssets.map((asset) => { const visualKey = asset.category === "scene" ? "scene" : asset.mediaType; const Icon = icons[visualKey] ?? Boxes; const previewUrl = asset.thumbnailUrl || (asset.mediaType === "image" ? asset.contentUrl || asset.sourceUrl : null); return <article key={asset.id}><div className={`visual-source-preview type-${visualKey}`}>{previewUrl ? <img src={previewUrl} alt="" /> : <Icon size={28} />}<span>{asset.mediaType.toUpperCase()} · {asset.category}</span></div><div><b>{asset.name}</b><small>{asset.description || "暂无描述"}</small></div></article>; })}{visualAssets.length === 0 && <button className="add-character" onClick={onAssets}><Plus size={24} /><b>添加首个视觉资产</b><span>支持图片、视频、3D 模型和场景资产</span></button>}</section></div>;
 }
 
 function DeliveryView({ assets, runs, onAgent }: { assets: ProjectAsset[]; runs: AgentRun[]; onAgent: () => void }) {
-  const counts = { video: assets.filter((asset) => asset.type === "video").length, audio: assets.filter((asset) => asset.type === "audio").length, image: assets.filter((asset) => asset.type === "image").length, model3d: assets.filter((asset) => asset.type === "model3d").length };
+  const counts = { video: assets.filter((asset) => asset.mediaType === "video").length, audio: assets.filter((asset) => asset.mediaType === "audio").length, image: assets.filter((asset) => asset.mediaType === "image").length, model3d: assets.filter((asset) => asset.mediaType === "model3d").length };
   return <div className="view-stack"><section className="delivery-hero"><div><span className="section-kicker">PERSISTENT PRODUCTION STATE</span><h2>项目生产材料已集中管理</h2><p>Agent 分析、上传素材和外部资产均保留在项目中，可继续接入生成任务与剪辑服务。</p></div><button className="primary-button" onClick={onAgent}><Bot size={16} /> 发起生产分析</button></section><section className="delivery-type-grid">{[[Video, "视频", counts.video], [FileAudio, "音频", counts.audio], [ImageIcon, "图片", counts.image], [Layers3, "3D 模型", counts.model3d]].map(([Icon, label, count]) => { const AssetIcon = Icon as LucideIcon; return <article key={String(label)}><AssetIcon size={19} /><span>{String(label)}</span><strong>{String(count)}</strong></article>; })}</section><section className="surface job-panel"><div className="section-heading"><div><span className="section-kicker">AGENT OUTPUTS</span><h2>最近分析记录</h2></div><span className="count-badge">{runs.length}</span></div><div className="job-list">{runs.slice(0, 8).map((run) => <div className="job-row" key={run.id}><div className="job-icon"><Bot size={18} /></div><div className="job-copy"><div><b>{run.prompt}</b><span>{run.status}</span></div><p>{run.modelName} · {run.sources.length} 个来源</p><div className="job-progress"><i style={{ width: run.status === "completed" ? "100%" : run.status === "failed" ? "18%" : "62%" }} /></div></div><strong>{run.status === "completed" ? "完成" : run.status}</strong></div>)}</div></section></div>;
 }
 
@@ -532,7 +633,7 @@ export default function Home() {
       add({ id: `script-${script.id}`, view: "scripts", title: script.title || "未命名剧本", detail: `剧本 · ${script.scenes?.length ?? 0} 场` }, `${script.title ?? ""} ${script.status ?? ""} ${String(script.bodyText ?? script.content ?? "")}`);
     }
     for (const asset of data.assets) {
-      add({ id: `asset-${asset.id}`, view: "assets", title: asset.name, detail: `资产 · ${asset.type}` }, `${asset.name} ${asset.description ?? ""} ${asset.type}`);
+      add({ id: `asset-${asset.id}`, view: "assets", title: asset.name, detail: `资产 · ${asset.mediaType} · ${asset.category}` }, `${asset.name} ${asset.description ?? ""} ${asset.mediaType} ${asset.category}`);
     }
     for (const run of data.agentRuns) {
       add({ id: `run-${run.id}`, view: "agent", title: run.prompt || "未命名分析", detail: `Agent · ${run.modelName}`, agentRunId: run.id }, `${run.prompt} ${run.modelName} ${run.response ?? ""}`);
@@ -597,7 +698,7 @@ export default function Home() {
         </div>
         <div className="nav-label">项目制作流程</div>
         <nav className="stage-nav" aria-label="项目制作阶段">
-          {productionNav.map((item, index) => { const Icon = item.icon; const meta = data ? stageMeta(item, data) : { value: "—", progress: 0 }; const active = activeView === item.id; return <button key={item.id} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => navigate(item.id)}><span className="nav-icon"><Icon size={17} /></span><span className="nav-copy"><b>{item.label}</b><small>{meta.value}</small></span>{meta.progress >= 90 ? <CheckCircle2 className="nav-state complete" size={15} /> : meta.progress > 0 ? <span className="nav-progress">{meta.progress}</span> : <CircleDotDashed className="nav-state" size={15} />}{index > 0 && index < productionNav.length - 1 && <i className="nav-rail" />}</button>; })}
+          {productionNav.map((item, index) => { const Icon = item.icon; const meta = data ? stageMeta(item, data) : { value: "—", progress: 0 }; const active = activeView === item.id; return <button key={item.id} className={active ? "active" : ""} aria-current={active ? "page" : undefined} onClick={() => navigate(item.id)}><span className="nav-icon"><Icon size={17} /></span><span className="nav-copy"><b>{item.label}</b><small>{meta.value}</small></span>{item.id === "overview" ? <span className="nav-progress">{meta.progress}%</span> : meta.progress >= 90 ? <CheckCircle2 className="nav-state complete" size={15} /> : meta.progress > 0 ? <span className="nav-progress">{meta.progress}%</span> : <CircleDotDashed className="nav-state" size={15} />}{index > 0 && index < productionNav.length - 1 && <i className="nav-rail" />}</button>; })}
         </nav>
         <div className="nav-label global-label">跨项目设置</div>
         <nav className="stage-nav global-stage-nav" aria-label="跨项目设置">{globalNav.map((item) => { const Icon = item.icon; return <button key={item.id} className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)}><span className="nav-icon"><Icon size={17} /></span><span className="nav-copy"><b>{item.label}</b><small>{data?.models.length ?? 0} 个配置</small></span><Database className="nav-state" size={15} /></button>; })}</nav>
@@ -615,7 +716,7 @@ export default function Home() {
             {activeView === "overview" && <OverviewView data={data} navigate={navigate} onOpenRun={openAgentRun} />}
             {activeView === "story" && <StoryView key={`${project.id}-${String((data.story as StoryRecord | null)?.updatedAt ?? "new")}`} projectId={project.id} story={data.story as StoryRecord | null} episodes={data.episodes as EpisodeRecord[]} onSaved={async () => { await loadWorkspace(project.id, true); }} />}
             {activeView === "characters" && <CharactersView key={project.id} projectId={project.id} characters={data.characters as CharacterRecord[]} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("人物列表刷新失败"); }} />}
-            {activeView === "scripts" && <ScriptsView key={project.id} scripts={data.scripts} onOpenAgent={() => navigate("agent")} />}
+            {activeView === "scripts" && <ScriptsView key={project.id} projectId={project.id} episodes={data.episodes as EpisodeRecord[]} scripts={data.scripts} onOpenAgent={() => navigate("agent")} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("剧本列表刷新失败"); }} />}
             {activeView === "breakdown" && <BreakdownView scripts={data.scripts} />}
             {activeView === "assets" && <AssetManager key={project.id} refreshKey={refreshKey} projectId={project.id} projectName={project.name} onAssetsChange={(assets) => setData((current) => current?.project?.id === project.id ? { ...current, assets } : current)} />}
             {activeView === "shots" && <ShotsView scripts={data.scripts} assets={data.assets} onAssets={() => navigate("assets")} />}

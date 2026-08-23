@@ -1,4 +1,5 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const workspaces = sqliteTable("workspaces", {
   userId: text("user_id").primaryKey(),
@@ -160,7 +161,8 @@ export const assets = sqliteTable(
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
-    type: text("type").notNull(),
+    mediaType: text("media_type").notNull().default("other"),
+    category: text("category").notNull().default("other"),
     description: text("description").notNull().default(""),
     mimeType: text("mime_type"),
     sizeBytes: integer("size_bytes"),
@@ -173,8 +175,30 @@ export const assets = sqliteTable(
     updatedAt: text("updated_at").notNull(),
   },
   (table) => [
-    index("idx_assets_project_type").on(table.projectId, table.type),
+    index("idx_assets_project_media_type").on(table.projectId, table.mediaType),
+    index("idx_assets_project_category").on(table.projectId, table.category),
     uniqueIndex("uidx_assets_storage_key").on(table.storageKey),
+  ],
+);
+
+export const assetRelations = sqliteTable(
+  "asset_relations",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    sourceAssetId: text("source_asset_id").notNull().references(() => assets.id, { onDelete: "cascade" }),
+    targetAssetId: text("target_asset_id").references(() => assets.id, { onDelete: "cascade" }),
+    targetCharacterId: text("target_character_id").references(() => characters.id, { onDelete: "cascade" }),
+    relationType: text("relation_type").notNull().default("related"),
+    note: text("note").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("idx_asset_relations_project").on(table.projectId),
+    index("idx_asset_relations_source").on(table.sourceAssetId),
+    index("idx_asset_relations_target_asset").on(table.targetAssetId),
+    index("idx_asset_relations_target_character").on(table.targetCharacterId),
+    check("asset_relations_target_xor", sql`(${table.targetAssetId} IS NOT NULL) != (${table.targetCharacterId} IS NOT NULL)`),
   ],
 );
 
