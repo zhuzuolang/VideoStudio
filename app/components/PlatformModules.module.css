@@ -256,6 +256,12 @@
   background: color-mix(in srgb, var(--module-success) 6%, var(--module-paper));
 }
 
+.noticeWarning {
+  color: #7a5a12;
+  border-color: color-mix(in srgb, var(--module-warning) 28%, var(--module-line));
+  background: color-mix(in srgb, var(--module-warning) 8%, var(--module-paper));
+}
+
 .modelGrid,
 .assetGrid {
   display: grid;
@@ -611,6 +617,49 @@
   min-height: 0;
 }
 
+.previewTabs {
+  position: sticky;
+  z-index: 3;
+  top: 73px;
+  display: flex;
+  gap: 5px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--module-line);
+  background: var(--module-paper);
+}
+
+.previewTabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--module-muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.previewTabs button[aria-selected="true"] {
+  color: var(--module-ink);
+  border-color: var(--module-line);
+  background: var(--module-soft);
+}
+
+.previewTabs button span {
+  display: grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--module-muted);
+  background: var(--module-paper);
+  font-size: 8px;
+}
+
 .previewViewport {
   display: grid;
   place-items: center;
@@ -701,6 +750,116 @@
   flex: 0 0 auto;
   color: var(--module-ink);
   text-decoration: none;
+}
+
+.previewRelationsPanel {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  background: color-mix(in srgb, var(--module-soft) 46%, var(--module-paper));
+}
+
+.relationDirectionSection {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--module-line);
+  border-radius: 11px;
+  background: var(--module-paper);
+}
+
+.relationSectionHeading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.relationSectionHeading h3 {
+  margin: 3px 0 0;
+  font-size: 13px;
+}
+
+.relationSectionHeading > span {
+  display: grid;
+  place-items: center;
+  min-width: 25px;
+  height: 25px;
+  border-radius: 999px;
+  color: var(--module-muted);
+  background: var(--module-soft);
+  font-size: 9px;
+}
+
+.relationDetailList {
+  display: grid;
+  gap: 7px;
+}
+
+.relationDetailList > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.relationDetailList > div > button:first-child {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 45px;
+  padding: 7px 9px;
+  border: 1px solid var(--module-line);
+  border-radius: 8px;
+  color: var(--module-ink);
+  text-align: left;
+  background: transparent;
+}
+
+.relationDetailList > div > button:first-child:hover:not(:disabled) {
+  border-color: var(--module-accent);
+  background: var(--module-accent-soft);
+}
+
+.relationDetailList > div > button:first-child > span {
+  display: grid;
+  grid-row: 1 / 3;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--module-accent-strong);
+  background: var(--module-accent-soft);
+}
+
+.relationDetailList b,
+.relationDetailList small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationDetailList b {
+  font-size: 10px;
+}
+
+.relationDetailList small {
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.previewRelationActions {
+  position: sticky;
+  bottom: -18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0 -18px -18px;
+  padding: 13px 18px;
+  border-top: 1px solid var(--module-line);
+  background: var(--module-paper);
 }
 
 .formGrid {
@@ -1541,7 +1700,7 @@
 }
 
 .assetFilters > .searchWrap {
-  grid-row: 1 / 3;
+  grid-row: 1 / 4;
   align-self: center;
 }
 
@@ -1567,13 +1726,18 @@
 }
 
 .relationChips {
+  position: relative;
+  z-index: 5;
   margin: 9px 0;
+  pointer-events: none;
 }
 
-.relationChips span {
+.relationChips span,
+.relationChips button {
   max-width: 100%;
   overflow: hidden;
   padding: 4px 6px;
+  border: 0;
   border-radius: 6px;
   color: var(--module-muted);
   font-size: 8px;
@@ -1582,27 +1746,147 @@
   background: var(--module-soft);
 }
 
-.relationPicker {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+.relationChips button {
+  pointer-events: auto;
 }
 
-.relationPicker > div {
+.relationChips button:hover,
+.relationChips button:focus-visible {
+  outline: 0;
+  color: var(--module-accent-strong);
+  background: var(--module-accent-soft);
+}
+
+.assetRelationWarning {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 8px 0;
+  color: #8b6817;
+  font-size: 8px;
+}
+
+.relationEditor {
+  gap: 11px;
+  background: color-mix(in srgb, var(--module-soft) 45%, var(--module-paper));
+}
+
+.relationEditor:disabled {
+  opacity: 0.74;
+}
+
+.relationComposer {
   display: grid;
-  align-content: start;
-  gap: 7px;
-  max-height: 180px;
+  grid-template-columns: minmax(130px, 0.7fr) minmax(180px, 1fr) minmax(180px, 1fr);
+  gap: 9px;
+}
+
+.relationSearchResults {
+  display: grid;
+  gap: 4px;
+  max-height: 210px;
   overflow-y: auto;
-  padding: 9px;
+  padding: 6px;
+  border: 1px solid var(--module-line);
   border-radius: 8px;
+  background: var(--module-paper);
+}
+
+.relationSearchResults > button {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  text-align: left;
+  background: transparent;
+}
+
+.relationSearchResults > button:hover,
+.relationSearchResults > button[aria-selected="true"] {
+  border-color: var(--module-accent);
+  background: var(--module-accent-soft);
+}
+
+.relationSearchResults > button > span {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  color: var(--module-accent-strong);
   background: var(--module-soft);
 }
 
-.relationPicker b,
-.relationPicker small {
-  color: var(--module-muted);
+.relationSearchResults b {
+  overflow: hidden;
   font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relationSearchResults small,
+.relationAddRow small,
+.relationEditorList small {
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.relationAddRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 6px 6px 10px;
+  border: 1px dashed var(--module-line);
+  border-radius: 8px;
+  color: var(--module-muted);
+  background: var(--module-paper);
+  font-size: 9px;
+}
+
+.relationEditorList {
+  display: grid;
+  gap: 6px;
+}
+
+.relationEditorList > div {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 6px 8px;
+  border: 1px solid var(--module-line);
+  border-radius: 8px;
+  background: var(--module-paper);
+}
+
+.relationEditorList > div > span {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  color: var(--module-accent-strong);
+  background: var(--module-accent-soft);
+}
+
+.relationEditorList > div > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.relationEditorList b {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @keyframes moduleSpin {
@@ -1669,10 +1953,21 @@
   }
 
   .assetHeaderActions,
-  .relationPicker,
+  .relationComposer,
   .filterGroup {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .relationAddRow,
+  .relationDetailList > div {
+    grid-template-columns: 1fr;
+  }
+
+  .previewRelationActions {
+    position: static;
+    margin: 0;
+    padding: 12px 0 0;
   }
 
   .dialogBackdrop {

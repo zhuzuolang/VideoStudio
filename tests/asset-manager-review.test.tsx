@@ -39,6 +39,7 @@ function makeAsset(overrides: Partial<ProjectAsset> = {}): ProjectAsset {
     status: "ready",
     metadata: null,
     relations: [],
+    relationsLoaded: true,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -164,7 +165,7 @@ describe("AssetManager 审查项回归", () => {
     expect(
       await screen.findByRole("heading", { name: "雨夜参考图" }),
     ).toBeVisible();
-    expect(screen.getByText("另有 1 条")).toBeVisible();
+    expect(screen.getByRole("button", { name: "另有 3 条" })).toBeVisible();
     expect(await screen.findByText(/人物关联选项加载失败/)).toBeVisible();
     expect(await screen.findByText(/图像模型选项加载失败/)).toBeVisible();
     expect(screen.getByRole("button", { name: "重试人物选项" })).toBeVisible();
@@ -259,11 +260,24 @@ describe("AssetManager 审查项回归", () => {
   });
 
   test("删除期间禁用编辑，更新预览 URL 后重新显示图片", async () => {
+    const relation = {
+      id: "relation-1",
+      targetType: "asset" as const,
+      targetId: "asset-reference",
+      targetName: "构图参考",
+      targetMediaType: "image" as const,
+      targetCategory: "reference" as const,
+      relationType: "references",
+      note: "",
+      direction: "outgoing" as const,
+    };
     const firstAsset = makeAsset({
       thumbnailUrl: "https://example.test/bad.png",
+      relations: [relation],
     });
     const nextAsset = makeAsset({
       thumbnailUrl: "https://example.test/good.png",
+      relations: [relation],
     });
     let assetLoads = 0;
     let resolveDelete: ((response: Response) => void) | undefined;
@@ -308,6 +322,9 @@ describe("AssetManager 审查项回归", () => {
 
     await user.click(
       screen.getByRole("button", { name: "删除资产 雨夜参考图" }),
+    );
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining("同时解除 1 条关联"),
     );
     expect(
       screen.getByRole("button", { name: "编辑资产 雨夜参考图" }),

@@ -112,6 +112,7 @@ export type ProjectAsset = {
   status: string;
   metadata: Record<string, unknown> | null;
   relations: AssetRelation[];
+  relationsLoaded: boolean;
   createdAt: string;
   updatedAt: string;
 };

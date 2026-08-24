@@ -409,10 +409,10 @@ export async function serializeAssetById(db: D1Database, assetId: string): Promi
   const row = await db.prepare(`${assetSelect} WHERE id = ?`).bind(assetId).first<Record<string, unknown>>();
   if (!row) return null;
   try {
-    return serializeAsset(row, await listAssetRelations(db, String(row.projectId), assetId));
+    return serializeAsset(row, await listAssetRelations(db, String(row.projectId), assetId), true);
   } catch (error) {
     console.error("Asset relation enrichment failed", { projectId: row.projectId, assetId, error });
-    return serializeAsset(row, []);
+    return serializeAsset(row, [], false);
   }
 }
 
@@ -473,7 +473,7 @@ export async function serializeProjectAssets(
     relationRows = await listProjectAssetRelations(db, projectId);
   } catch (error) {
     console.error("Project asset relation enrichment failed", { projectId, error });
-    return assetRows.map((row) => serializeAsset(row, []));
+    return assetRows.map((row) => serializeAsset(row, [], false));
   }
   const relationsByAsset = new Map<string, Record<string, unknown>[]>();
   for (const relation of relationRows) {
@@ -482,7 +482,7 @@ export async function serializeProjectAssets(
     delete serializedRelation.ownerAssetId;
     relationsByAsset.set(ownerAssetId, [...(relationsByAsset.get(ownerAssetId) ?? []), serializedRelation]);
   }
-  return assetRows.map((row) => serializeAsset(row, relationsByAsset.get(String(row.id)) ?? []));
+  return assetRows.map((row) => serializeAsset(row, relationsByAsset.get(String(row.id)) ?? [], true));
 }
 
 export async function replaceAssetRelations(
@@ -574,13 +574,18 @@ const assetSelect = `SELECT id, project_id AS projectId, name, media_type AS med
   thumbnail_url AS thumbnailUrl, metadata_json AS metadataJson, status,
   created_at AS createdAt, updated_at AS updatedAt FROM assets`;
 
-function serializeAsset(row: Record<string, unknown>, relations: Record<string, unknown>[] = []): Record<string, unknown> {
+function serializeAsset(
+  row: Record<string, unknown>,
+  relations: Record<string, unknown>[],
+  relationsLoaded: boolean,
+): Record<string, unknown> {
   return {
     ...row,
     metadata: parseJson(row.metadataJson, {}),
     hasContent: Boolean(row.storageKey),
     contentUrl: row.storageKey ? `/api/projects/${row.projectId}/assets/${row.id}/content` : null,
     relations,
+    relationsLoaded,
     metadataJson: undefined,
     storageKey: undefined,
   };

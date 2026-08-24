@@ -42,6 +42,13 @@ import {
   type ProjectAssetInput,
 } from "@/lib/platform-types";
 import {
+  ASSET_RELATION_META,
+  ASSET_RELATION_TYPES,
+  relationDirectionLabel,
+  relationTypeLabel,
+  type AssetRelationType,
+} from "@/lib/asset-relations";
+import {
   apiRequest,
   PlatformApiError,
   getModelCapabilities,
@@ -60,6 +67,7 @@ type AssetManagerProps = {
 type CharacterOption = { id: string; name: string };
 type SourceMode = "file" | "url";
 type DialogMode = "asset" | "generate" | null;
+type RelationFilter = "all" | "linked" | "unlinked" | AssetRelationType;
 type AssetForm = {
   name: string;
   mediaType: AssetMediaType;
@@ -67,8 +75,7 @@ type AssetForm = {
   description: string;
   sourceUrl: string;
   thumbnailUrl: string;
-  relatedAssetIds: string[];
-  relatedCharacterIds: string[];
+  relations: AssetRelationInput[];
 };
 type GenerateForm = {
   modelId: string;
@@ -77,8 +84,7 @@ type GenerateForm = {
   prompt: string;
   aspectRatio: string;
   size: string;
-  relatedAssetIds: string[];
-  relatedCharacterIds: string[];
+  relations: AssetRelationInput[];
 };
 
 const MEDIA_META: Record<AssetMediaType, { label: string; icon: LucideIcon }> =
@@ -111,8 +117,7 @@ const EMPTY_ASSET: AssetForm = {
   description: "",
   sourceUrl: "",
   thumbnailUrl: "",
-  relatedAssetIds: [],
-  relatedCharacterIds: [],
+  relations: [],
 };
 const EMPTY_GENERATE: GenerateForm = {
   modelId: "",
@@ -121,8 +126,7 @@ const EMPTY_GENERATE: GenerateForm = {
   prompt: "",
   aspectRatio: "1:1",
   size: "",
-  relatedAssetIds: [],
-  relatedCharacterIds: [],
+  relations: [],
 };
 
 function isHttpUrl(value: string): boolean {
@@ -133,19 +137,15 @@ function isHttpUrl(value: string): boolean {
     return false;
   }
 }
-function relationInputs(
-  form: Pick<AssetForm, "relatedAssetIds" | "relatedCharacterIds">,
-): AssetRelationInput[] {
-  return [
-    ...form.relatedAssetIds.map((targetId) => ({
-      targetType: "asset" as const,
-      targetId,
-    })),
-    ...form.relatedCharacterIds.map((targetId) => ({
-      targetType: "character" as const,
-      targetId,
-    })),
-  ];
+function outgoingRelationInputs(asset: ProjectAsset): AssetRelationInput[] {
+  return asset.relations
+    .filter((relation) => relation.direction === "outgoing")
+    .map((relation) => ({
+      targetType: relation.targetType,
+      targetId: relation.targetId,
+      relationType: relation.relationType || "related",
+      note: relation.note || "",
+    }));
 }
 function isImageModel(model: AiModel): boolean {
   const capabilities = getModelCapabilities(model).map((value) =>
@@ -340,66 +340,135 @@ function GenerationCard({
   );
 }
 
-type RelationFieldsProps = {
+type RelationEditorProps = {
   characters: CharacterOption[];
   assets: ProjectAsset[];
-  value: Pick<AssetForm, "relatedAssetIds" | "relatedCharacterIds">;
-  onToggle: (
-    kind: "asset" | "character",
-    targetId: string,
-    checked: boolean,
-  ) => void;
+  value: AssetRelationInput[];
+  onChange: (relations: AssetRelationInput[]) => void;
+  disabled?: boolean;
+  disabledReason?: string;
+  legend?: string;
+  showExisting?: boolean;
 };
 
-function RelationFields({
+function RelationEditor({
   characters,
   assets,
   value,
-  onToggle,
-}: RelationFieldsProps) {
+  onChange,
+  disabled = false,
+  disabledReason,
+  legend = "关联管理",
+  showExisting = true,
+}: RelationEditorProps) {
+  const [relationType, setRelationType] = useState<AssetRelationType>("references");
+  const [targetSearch, setTargetSearch] = useState("");
+  const [selectedTarget, setSelectedTarget] = useState<{ targetType: "asset" | "character"; targetId: string } | null>(null);
+  const [note, setNote] = useState("");
+  const needle = targetSearch.trim().toLocaleLowerCase("zh-CN");
+  const targets = useMemo(() => [
+    ...assets.map((asset) => ({
+      targetType: "asset" as const,
+      targetId: asset.id,
+      name: asset.name,
+      detail: `${MEDIA_META[asset.mediaType].label} · ${CATEGORY_META[asset.category].label}`,
+    })),
+    ...characters.map((character) => ({
+      targetType: "character" as const,
+      targetId: character.id,
+      name: character.name,
+      detail: "项目人物",
+    })),
+  ].filter((target) => !needle || `${target.name} ${target.detail}`.toLocaleLowerCase("zh-CN").includes(needle)).slice(0, 10), [assets, characters, needle]);
+  const selectedTargetRecord = selectedTarget
+    ? targets.find((target) => target.targetType === selectedTarget.targetType && target.targetId === selectedTarget.targetId)
+      ?? [...assets.map((asset) => ({ targetType: "asset" as const, targetId: asset.id, name: asset.name, detail: MEDIA_META[asset.mediaType].label })),
+          ...characters.map((character) => ({ targetType: "character" as const, targetId: character.id, name: character.name, detail: "项目人物" }))]
+        .find((target) => target.targetType === selectedTarget.targetType && target.targetId === selectedTarget.targetId)
+    : null;
+  const duplicate = selectedTarget ? value.some((relation) =>
+    relation.targetType === selectedTarget.targetType
+    && relation.targetId === selectedTarget.targetId
+    && (relation.relationType || "related") === relationType,
+  ) : false;
+
+  function targetName(relation: AssetRelationInput): string {
+    if (relation.targetType === "asset") {
+      return assets.find((asset) => asset.id === relation.targetId)?.name ?? "已移除资产";
+    }
+    return characters.find((character) => character.id === relation.targetId)?.name ?? "已移除人物";
+  }
+
+  function addRelation() {
+    if (!selectedTarget || duplicate || disabled) return;
+    onChange([...value, {
+      ...selectedTarget,
+      relationType,
+      note: note.trim(),
+    }]);
+    setSelectedTarget(null);
+    setTargetSearch("");
+    setNote("");
+  }
+
   return (
-    <fieldset className={styles.fieldset}>
-      <legend>关联人物与资产</legend>
-      <div className={styles.relationPicker}>
-        <div>
-          <b>人物</b>
-          {characters.length ? (
-            characters.map((character) => (
-              <label className={styles.checkboxLine} key={character.id}>
-                <input
-                  type="checkbox"
-                  checked={value.relatedCharacterIds.includes(character.id)}
-                  onChange={(event) =>
-                    onToggle("character", character.id, event.target.checked)
-                  }
-                />
-                <span>{character.name}</span>
-              </label>
-            ))
-          ) : (
-            <small>当前项目暂无人物</small>
-          )}
-        </div>
-        <div>
-          <b>已有资产</b>
-          {assets.length ? (
-            assets.map((asset) => (
-              <label className={styles.checkboxLine} key={asset.id}>
-                <input
-                  type="checkbox"
-                  checked={value.relatedAssetIds.includes(asset.id)}
-                  onChange={(event) =>
-                    onToggle("asset", asset.id, event.target.checked)
-                  }
-                />
-                <span>{asset.name}</span>
-              </label>
-            ))
-          ) : (
-            <small>暂无其他资产</small>
-          )}
-        </div>
+    <fieldset className={joinClassNames(styles.fieldset, styles.relationEditor)} disabled={disabled}>
+      <legend>{legend}</legend>
+      {disabledReason && <div className={joinClassNames(styles.notice, styles.noticeWarning)} role="status">{disabledReason}</div>}
+      <div className={styles.relationComposer}>
+        <label className={styles.field}>
+          <span>关系类型</span>
+          <select aria-label="关系类型" value={relationType} onChange={(event) => setRelationType(event.target.value as AssetRelationType)}>
+            {ASSET_RELATION_TYPES.map((type) => <option key={type} value={type}>{ASSET_RELATION_META[type].label}</option>)}
+          </select>
+        </label>
+        <label className={styles.field}>
+          <span>搜索关联目标</span>
+          <input
+            aria-label="搜索关联目标"
+            value={targetSearch}
+            onChange={(event) => {
+              setTargetSearch(event.target.value);
+              setSelectedTarget(null);
+            }}
+            placeholder="搜索资产或人物"
+          />
+        </label>
+        <label className={styles.field}>
+          <span>关联备注</span>
+          <input aria-label="关联备注" value={note} onChange={(event) => setNote(event.target.value)} placeholder="可选，例如：构图参考" />
+        </label>
       </div>
+      {(targetSearch.trim() || selectedTarget) && (
+        <div className={styles.relationSearchResults} role="listbox" aria-label="关联目标搜索结果">
+          {targets.map((target) => {
+            const selected = selectedTarget?.targetType === target.targetType && selectedTarget.targetId === target.targetId;
+            return <button
+              type="button"
+              role="option"
+              aria-selected={selected}
+              key={`${target.targetType}:${target.targetId}`}
+              onClick={() => setSelectedTarget({ targetType: target.targetType, targetId: target.targetId })}
+            ><span>{target.targetType === "asset" ? <Package size={14} /> : <UserRound size={14} />}</span><b>{target.name}</b><small>{target.detail}</small></button>;
+          })}
+          {targets.length === 0 && <small>没有匹配的资产或人物</small>}
+        </div>
+      )}
+      <div className={styles.relationAddRow}>
+        <span>{selectedTargetRecord ? `${ASSET_RELATION_META[relationType].outgoingLabel} → ${selectedTargetRecord.name}` : "先搜索并选择一个关联目标"}</span>
+        {duplicate && <small>该关系已存在</small>}
+        <button type="button" className={styles.secondaryButton} onClick={addRelation} disabled={!selectedTarget || duplicate || disabled}><Plus size={13} /> 添加关联</button>
+      </div>
+      {showExisting && <div className={styles.relationEditorList}>
+        {value.map((relation, index) => (
+          <div key={`${relation.targetType}:${relation.targetId}:${relation.relationType ?? "related"}:${index}`}>
+            <span>{relation.targetType === "asset" ? <Package size={14} /> : <UserRound size={14} />}</span>
+            <div><b>{relationTypeLabel(relation.relationType || "related")} · {targetName(relation)}</b>{relation.note && <small>{relation.note}</small>}</div>
+            <button type="button" className={styles.textButton} aria-label={`移除关联 ${targetName(relation)}`} onClick={() => onChange(value.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /> 移除</button>
+          </div>
+        ))}
+        {value.length === 0 && <small>尚未添加关联</small>}
+      </div>}
     </fieldset>
   );
 }
@@ -427,9 +496,16 @@ export default function AssetManager({
   const [categoryFilter, setCategoryFilter] = useState<"all" | AssetCategory>(
     "all",
   );
+  const [relationFilter, setRelationFilter] =
+    useState<RelationFilter>("all");
   const [dialog, setDialog] = useState<DialogMode>(null);
   const [editing, setEditing] = useState<ProjectAsset | null>(null);
-  const [previewingAsset, setPreviewingAsset] = useState<ProjectAsset | null>(null);
+  const [previewingAssetId, setPreviewingAssetId] = useState<string | null>(null);
+  const [previewTab, setPreviewTab] = useState<"preview" | "relations">("preview");
+  const [previewRelations, setPreviewRelations] = useState<AssetRelationInput[]>([]);
+  const [previewRelationsDirty, setPreviewRelationsDirty] = useState(false);
+  const [previewRelationsSaving, setPreviewRelationsSaving] = useState(false);
+  const [previewRelationsError, setPreviewRelationsError] = useState("");
   const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
   const [sourceMode, setSourceMode] = useState<SourceMode>("file");
   const [form, setForm] = useState<AssetForm>(EMPTY_ASSET);
@@ -439,6 +515,7 @@ export default function AssetManager({
   const [saving, setSaving] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [dirty, setDirty] = useState(false);
+  const [relationsDirty, setRelationsDirty] = useState(false);
   const requestSequence = useRef(0);
   const generationRequestSequence = useRef(0);
   const characterRequestSequence = useRef(0);
@@ -598,6 +675,7 @@ export default function AssetManager({
       setSearch("");
       setMediaFilter("all");
       setCategoryFilter("all");
+      setRelationFilter("all");
       setDialog(null);
       setCharacters([]);
       setModels([]);
@@ -671,11 +749,11 @@ export default function AssetManager({
     return () => removeEventListener("keydown", listener);
   }, [dialog, dirty, saving]);
   useEffect(() => {
-    if (!previewingAsset) return;
+    if (!previewingAssetId) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const timer = window.setTimeout(() => previewCloseRef.current?.focus(), 0);
     const listener = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPreviewingAsset(null);
+      if (event.key === "Escape") setPreviewingAssetId(null);
     };
     window.addEventListener("keydown", listener);
     return () => {
@@ -683,7 +761,7 @@ export default function AssetManager({
       window.removeEventListener("keydown", listener);
       if (previouslyFocused?.isConnected) window.setTimeout(() => previouslyFocused.focus(), 0);
     };
-  }, [previewingAsset]);
+  }, [previewingAssetId]);
 
   const eligibleModels = useMemo(() => models.filter(isImageModel), [models]);
   const visibleAssets = useMemo(() => {
@@ -692,12 +770,23 @@ export default function AssetManager({
       (asset) =>
         (mediaFilter === "all" || asset.mediaType === mediaFilter) &&
         (categoryFilter === "all" || asset.category === categoryFilter) &&
+        (relationFilter === "all" ||
+          (relationFilter === "linked" && asset.relations.length > 0) ||
+          (relationFilter === "unlinked" &&
+            asset.relationsLoaded &&
+            asset.relations.length === 0) ||
+          (ASSET_RELATION_TYPES.includes(
+            relationFilter as AssetRelationType,
+          ) &&
+            asset.relations.some(
+              (relation) => relation.relationType === relationFilter,
+            ))) &&
         (!needle ||
           `${asset.name} ${asset.description ?? ""} ${MEDIA_META[asset.mediaType].label} ${CATEGORY_META[asset.category].label}`
             .toLowerCase()
             .includes(needle)),
     );
-  }, [assets, mediaFilter, categoryFilter, search]);
+  }, [assets, mediaFilter, categoryFilter, relationFilter, search]);
   const generationCards = useMemo(() => {
     const candidates = generations.filter((generation) => !(
       generation.status === "succeeded"
@@ -710,6 +799,10 @@ export default function AssetManager({
     const history = candidates.filter((generation) => !active.includes(generation)).slice(0, 12);
     return [...active, ...history];
   }, [assets, generations]);
+  const previewingAsset = useMemo(
+    () => assets.find((asset) => asset.id === previewingAssetId) ?? null,
+    [assets, previewingAssetId],
+  );
   const previewSource = previewingAsset ? assetPreviewSource(previewingAsset) : null;
   const PreviewIcon = previewingAsset
     ? MEDIA_META[previewingAsset.mediaType]?.icon ?? Package
@@ -719,9 +812,52 @@ export default function AssetManager({
   const selectableAssets = (currentId?: string) =>
     assets.filter((asset) => asset.id !== currentId);
 
-  function openPreview(asset: ProjectAsset) {
+  useEffect(() => {
+    if (!previewingAsset || previewRelationsDirty) return;
+    setPreviewRelations(outgoingRelationInputs(previewingAsset));
+  }, [previewRelationsDirty, previewingAsset]);
+
+  function openPreview(asset: ProjectAsset, tab: "preview" | "relations" = "preview") {
     setPreviewLoadFailed(false);
-    setPreviewingAsset(asset);
+    setPreviewTab(tab);
+    setPreviewRelations(outgoingRelationInputs(asset));
+    setPreviewRelationsDirty(false);
+    setPreviewRelationsError("");
+    setPreviewingAssetId(asset.id);
+  }
+
+  function relationTargetName(relation: Pick<AssetRelationInput, "targetType" | "targetId">): string {
+    if (relation.targetType === "asset") {
+      return assets.find((asset) => asset.id === relation.targetId)?.name ?? "已移除资产";
+    }
+    return characters.find((character) => character.id === relation.targetId)?.name ?? "已移除人物";
+  }
+
+  function openRelationTarget(relation: Pick<AssetRelationInput, "targetType" | "targetId">) {
+    if (relation.targetType !== "asset") return;
+    const target = assets.find((asset) => asset.id === relation.targetId);
+    if (target) openPreview(target);
+  }
+
+  async function savePreviewRelations() {
+    if (!previewingAsset || !previewingAsset.relationsLoaded || !previewRelationsDirty) return;
+    setPreviewRelationsSaving(true);
+    setPreviewRelationsError("");
+    try {
+      const response = await apiRequest<ProjectAsset | { asset: ProjectAsset }>(
+        `/api/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(previewingAsset.id)}`,
+        { method: "PATCH", body: JSON.stringify({ relations: previewRelations }) },
+      );
+      const updatedAsset = "asset" in response ? response.asset : response;
+      setAssets((current) => current.map((asset) => asset.id === updatedAsset.id ? updatedAsset : asset));
+      setPreviewRelationsDirty(false);
+      setSuccess(`资产“${previewingAsset.name}”的关联已保存。`);
+      await loadAssets(true);
+    } catch (reason) {
+      setPreviewRelationsError(reason instanceof Error ? reason.message : "资产关联保存失败。");
+    } finally {
+      setPreviewRelationsSaving(false);
+    }
   }
 
   function openCreate() {
@@ -731,6 +867,7 @@ export default function AssetManager({
     setSourceMode("file");
     setFormError("");
     setDirty(false);
+    setRelationsDirty(false);
     setDialog("asset");
   }
   function openEdit(asset: ProjectAsset) {
@@ -744,17 +881,11 @@ export default function AssetManager({
       description: asset.description ?? "",
       sourceUrl: asset.sourceUrl ?? "",
       thumbnailUrl: asset.thumbnailUrl ?? "",
-      relatedAssetIds: asset.relations
-        .filter((r) => r.direction === "outgoing" && r.targetType === "asset")
-        .map((r) => r.targetId),
-      relatedCharacterIds: asset.relations
-        .filter(
-          (r) => r.direction === "outgoing" && r.targetType === "character",
-        )
-        .map((r) => r.targetId),
+      relations: outgoingRelationInputs(asset),
     });
     setFormError("");
     setDirty(false);
+    setRelationsDirty(false);
     setDialog("asset");
   }
   function openGenerate() {
@@ -764,6 +895,7 @@ export default function AssetManager({
     });
     setFormError("");
     setDirty(false);
+    setRelationsDirty(false);
     setDialog("generate");
   }
   function closeDialog() {
@@ -798,28 +930,17 @@ export default function AssetManager({
         name: nextFile.name.replace(/\.[^.]+$/, ""),
       }));
   }
-  function toggleRelation(
-    kind: "asset" | "character",
-    targetId: string,
-    checked: boolean,
-    generation = false,
-  ) {
-    const key = kind === "asset" ? "relatedAssetIds" : "relatedCharacterIds";
-    if (generation)
-      setGenerateForm((current) => ({
-        ...current,
-        [key]: checked
-          ? [...current[key], targetId]
-          : current[key].filter((id) => id !== targetId),
-      }));
-    else
-      setForm((current) => ({
-        ...current,
-        [key]: checked
-          ? [...current[key], targetId]
-          : current[key].filter((id) => id !== targetId),
-      }));
+  function updateFormRelations(relations: AssetRelationInput[]) {
+    setForm((current) => ({ ...current, relations }));
+    setRelationsDirty(true);
     setDirty(true);
+    setFormError("");
+  }
+
+  function updateGenerateRelations(relations: AssetRelationInput[]) {
+    setGenerateForm((current) => ({ ...current, relations }));
+    setDirty(true);
+    setFormError("");
   }
 
   async function saveAsset(event: React.FormEvent) {
@@ -842,17 +963,17 @@ export default function AssetManager({
     setFormError("");
     try {
       const endpoint = `/api/projects/${encodeURIComponent(projectId)}/assets`;
-      const relations = relationInputs(form);
+      const relations = form.relations;
       if (editing) {
-        const body = {
+        const body: Record<string, unknown> = {
           name: form.name.trim(),
           mediaType: form.mediaType,
           category: form.category,
           description: form.description.trim(),
           sourceUrl: form.sourceUrl.trim() || null,
           thumbnailUrl: form.thumbnailUrl.trim() || null,
-          relations,
         };
+        if (relationsDirty && editing.relationsLoaded) body.relations = relations;
         await apiRequest(`${endpoint}/${encodeURIComponent(editing.id)}`, {
           method: "PATCH",
           body: JSON.stringify(body),
@@ -916,7 +1037,7 @@ export default function AssetManager({
       prompt: snapshot.prompt,
       size: snapshot.size || null,
       aspectRatio: snapshot.aspectRatio || null,
-      relations: relationInputs(snapshot),
+      relations: snapshot.relations,
       status: "submitting",
       phase: "queued",
       progress: 0,
@@ -936,6 +1057,7 @@ export default function AssetManager({
     setDirty(false);
     setMediaFilter("all");
     setCategoryFilter("all");
+    setRelationFilter("all");
     setSaving(true);
     setFormError("");
     const enqueue = () => apiRequest<{ generation: AssetGenerationJob }>(
@@ -947,7 +1069,7 @@ export default function AssetManager({
           ...snapshot,
           clientRequestId,
           size: snapshot.size || undefined,
-          relations: relationInputs(snapshot),
+          relations: snapshot.relations,
         }),
       },
     );
@@ -1063,7 +1185,17 @@ export default function AssetManager({
     }
   }
   async function deleteAsset(asset: ProjectAsset) {
-    if (!confirm(`确定删除资产“${asset.name}”吗？`)) return;
+    const relationImpact = !asset.relationsLoaded
+      ? "关联数据未完整加载；删除后，与它有关的关联也会一并解除。"
+      : asset.relations.length > 0
+        ? `这会同时解除 ${asset.relations.length} 条关联。`
+        : "";
+    if (
+      !confirm(
+        `确定删除资产“${asset.name}”吗？${relationImpact ? `\n\n${relationImpact}` : ""}`,
+      )
+    )
+      return;
     setDeletingIds((current) => new Set(current).add(asset.id));
     try {
       await apiRequest(
@@ -1308,6 +1440,37 @@ export default function AssetManager({
                 ))}
               </div>
             </fieldset>
+            <fieldset className={styles.filterGroup}>
+              <legend className={styles.filterLegend}>关联关系</legend>
+              <div
+                className={styles.filterBar}
+                role="group"
+                aria-label="按关联关系筛选"
+              >
+                {([
+                  ["all", "全部"],
+                  ["linked", "有关系"],
+                  ["unlinked", "无关系"],
+                  ...ASSET_RELATION_TYPES.map((type) => [
+                    type,
+                    ASSET_RELATION_META[type].label,
+                  ] as const),
+                ] as const).map(([value, label]) => (
+                  <button
+                    type="button"
+                    key={value}
+                    aria-pressed={relationFilter === value}
+                    className={joinClassNames(
+                      styles.segmentedButton,
+                      relationFilter === value && styles.segmentedButtonActive,
+                    )}
+                    onClick={() => setRelationFilter(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </fieldset>
           </div>
           {!assets.length ? (
             <div className={styles.stateBox}>
@@ -1341,7 +1504,7 @@ export default function AssetManager({
               <div>
                 <Search size={25} />
                 <h3>没有匹配的资产</h3>
-                <p>尝试清空搜索词或切换介质、制作分类。</p>
+                <p>尝试清空搜索词或切换介质、制作分类、关联关系。</p>
               </div>
             </div>
           ) : (
@@ -1362,6 +1525,7 @@ export default function AssetManager({
                       type="button"
                       className={styles.iconButton}
                       aria-label={`编辑资产 ${asset.name}`}
+                      aria-describedby={!asset.relationsLoaded ? `asset-relations-warning-${asset.id}` : undefined}
                       onClick={() => openEdit(asset)}
                       disabled={deletingIds.has(asset.id)}
                     >
@@ -1394,19 +1558,18 @@ export default function AssetManager({
                     <p>{asset.description || "暂无描述"}</p>
                     {asset.relations.length > 0 && (
                       <div className={styles.relationChips}>
-                        {asset.relations.slice(0, 4).map((relation) => (
-                          <span key={`${relation.id}:${relation.direction}`}>
-                            {relation.direction === "incoming"
-                              ? "被关联"
-                              : "关联"}{" "}
-                            · {relation.targetName}
-                          </span>
-                        ))}
-                        {asset.relations.length > 4 && (
-                          <span>另有 {asset.relations.length - 4} 条</span>
+                        {asset.relations.slice(0, 2).map((relation) => {
+                          const label = `${relationDirectionLabel(relation.relationType, relation.direction)} · ${relation.targetName}`;
+                          return relation.targetType === "asset" ? (
+                            <button type="button" key={`${relation.id}:${relation.direction}`} aria-label={label} onClick={() => openRelationTarget(relation)}>{label}</button>
+                          ) : <span key={`${relation.id}:${relation.direction}`}>{label}</span>;
+                        })}
+                        {asset.relations.length > 2 && (
+                          <button type="button" onClick={() => openPreview(asset, "relations")}>另有 {asset.relations.length - 2} 条</button>
                         )}
                       </div>
                     )}
+                    {!asset.relationsLoaded && <div id={`asset-relations-warning-${asset.id}`} className={styles.assetRelationWarning} role="status"><AlertCircle size={12} /> 关联数据未完整加载</div>}
                     <div className={styles.assetFoot}>
                       <span className={styles.statusBadge}>{assetStatusLabel(asset)}</span>
                       <time>
@@ -1425,7 +1588,7 @@ export default function AssetManager({
           className={styles.dialogBackdrop}
           role="presentation"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setPreviewingAsset(null);
+            if (event.target === event.currentTarget) setPreviewingAssetId(null);
           }}
         >
           <div
@@ -1445,62 +1608,101 @@ export default function AssetManager({
                 className={styles.iconButton}
                 type="button"
                 aria-label="关闭资产预览"
-                onClick={() => setPreviewingAsset(null)}
+                onClick={() => setPreviewingAssetId(null)}
               >
                 <X size={16} />
               </button>
             </header>
-            <div className={styles.previewDialogBody}>
-              <div className={styles.previewViewport}>
-                {previewSource && !previewLoadFailed && previewingAsset.mediaType === "image" && (
-                  <img
-                    src={previewSource}
-                    alt={`${previewingAsset.name} 大图预览`}
-                    onError={() => setPreviewLoadFailed(true)}
-                  />
-                )}
-                {previewSource && !previewLoadFailed && previewingAsset.mediaType === "video" && (
-                  <video src={previewSource} controls onError={() => setPreviewLoadFailed(true)} />
-                )}
-                {previewSource && !previewLoadFailed && previewingAsset.mediaType === "audio" && (
-                  <div className={styles.previewAudio}>
-                    <PreviewIcon size={42} />
-                    <audio src={previewSource} controls onError={() => setPreviewLoadFailed(true)} />
-                  </div>
-                )}
-                {previewSource && !previewLoadFailed && previewIsPdf && (
-                  <iframe src={previewSource} title={`${previewingAsset.name} 文档预览`} />
-                )}
-                {(!previewSource || previewLoadFailed || !["image", "video", "audio"].includes(previewingAsset.mediaType) && !previewIsPdf) && (
-                  <div className={styles.previewFallback}>
-                    <PreviewIcon size={46} />
-                    <b>{previewLoadFailed ? "暂时无法载入预览" : "此类资产暂不支持内嵌预览"}</b>
-                    <span>{previewSource ? "可使用下方按钮打开原文件。" : "该资产尚未关联可查看的文件或地址。"}</span>
-                  </div>
-                )}
-              </div>
-              <div className={styles.previewMetaBar}>
-                <div>
-                  <div className={styles.previewBadges}>
-                    <span className={styles.sourceBadge}>{MEDIA_META[previewingAsset.mediaType].label}</span>
-                    <span className={styles.levelBadge}>{CATEGORY_META[previewingAsset.category].label}</span>
-                    <span className={styles.statusBadge}>{assetStatusLabel(previewingAsset)}</span>
-                    {formatAssetSize(previewingAsset.sizeBytes) && <span>{formatAssetSize(previewingAsset.sizeBytes)}</span>}
-                  </div>
-                  <p>{previewingAsset.description || "暂无资产描述"}</p>
-                </div>
-                {previewSource && (
-                  <a
-                    className={joinClassNames(styles.secondaryButton, styles.previewOpenLink)}
-                    href={previewSource}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <ExternalLink size={14} /> 打开原文件
-                  </a>
-                )}
-              </div>
+            <div
+              className={styles.previewTabs}
+              role="tablist"
+              aria-label="资产详情"
+              onKeyDown={(event) => {
+                if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const nextTab = event.key === "ArrowRight" || event.key === "End" ? "relations" : "preview";
+                setPreviewTab(nextTab);
+                (event.currentTarget.querySelector(`[data-preview-tab="${nextTab}"]`) as HTMLButtonElement | null)?.focus();
+              }}
+            >
+              <button data-preview-tab="preview" type="button" role="tab" id="asset-preview-tab-preview" aria-controls="asset-preview-panel-preview" aria-selected={previewTab === "preview"} onClick={() => setPreviewTab("preview")}>预览</button>
+              <button data-preview-tab="relations" type="button" role="tab" id="asset-preview-tab-relations" aria-controls="asset-preview-panel-relations" aria-selected={previewTab === "relations"} onClick={() => setPreviewTab("relations")}>关联 <span>{previewingAsset.relations.length}</span></button>
             </div>
+            {previewTab === "preview" ? (
+              <div className={styles.previewDialogBody} id="asset-preview-panel-preview" role="tabpanel" aria-labelledby="asset-preview-tab-preview">
+                <div className={styles.previewViewport}>
+                  {previewSource && !previewLoadFailed && previewingAsset.mediaType === "image" && (
+                    <img src={previewSource} alt={`${previewingAsset.name} 大图预览`} onError={() => setPreviewLoadFailed(true)} />
+                  )}
+                  {previewSource && !previewLoadFailed && previewingAsset.mediaType === "video" && (
+                    <video src={previewSource} controls onError={() => setPreviewLoadFailed(true)} />
+                  )}
+                  {previewSource && !previewLoadFailed && previewingAsset.mediaType === "audio" && (
+                    <div className={styles.previewAudio}><PreviewIcon size={42} /><audio src={previewSource} controls onError={() => setPreviewLoadFailed(true)} /></div>
+                  )}
+                  {previewSource && !previewLoadFailed && previewIsPdf && (
+                    <iframe src={previewSource} title={`${previewingAsset.name} 文档预览`} />
+                  )}
+                  {(!previewSource || previewLoadFailed || !["image", "video", "audio"].includes(previewingAsset.mediaType) && !previewIsPdf) && (
+                    <div className={styles.previewFallback}><PreviewIcon size={46} /><b>{previewLoadFailed ? "暂时无法载入预览" : "此类资产暂不支持内嵌预览"}</b><span>{previewSource ? "可使用下方按钮打开原文件。" : "该资产尚未关联可查看的文件或地址。"}</span></div>
+                  )}
+                </div>
+                <div className={styles.previewMetaBar}>
+                  <div>
+                    <div className={styles.previewBadges}>
+                      <span className={styles.sourceBadge}>{MEDIA_META[previewingAsset.mediaType].label}</span>
+                      <span className={styles.levelBadge}>{CATEGORY_META[previewingAsset.category].label}</span>
+                      <span className={styles.statusBadge}>{assetStatusLabel(previewingAsset)}</span>
+                      {formatAssetSize(previewingAsset.sizeBytes) && <span>{formatAssetSize(previewingAsset.sizeBytes)}</span>}
+                    </div>
+                    <p>{previewingAsset.description || "暂无资产描述"}</p>
+                  </div>
+                  {previewSource && <a className={joinClassNames(styles.secondaryButton, styles.previewOpenLink)} href={previewSource} target="_blank" rel="noreferrer"><ExternalLink size={14} /> 打开原文件</a>}
+                </div>
+              </div>
+            ) : (
+              <div className={styles.previewRelationsPanel} id="asset-preview-panel-relations" role="tabpanel" aria-labelledby="asset-preview-tab-relations">
+                <section className={styles.relationDirectionSection} aria-labelledby="asset-outgoing-relations-title">
+                  <div className={styles.relationSectionHeading}><div><span className={styles.eyebrow}>OUTGOING</span><h3 id="asset-outgoing-relations-title">关联到</h3></div><span>{previewRelations.length}</span></div>
+                  <div className={styles.relationDetailList}>
+                    {previewRelations.map((relation, index) => {
+                      const targetName = relationTargetName(relation);
+                      const label = `${relationDirectionLabel(relation.relationType || "related", "outgoing")} · ${targetName}`;
+                      return <div key={`${relation.targetType}:${relation.targetId}:${relation.relationType ?? "related"}:${index}`}>
+                        <button type="button" aria-label={label} onClick={() => openRelationTarget(relation)} disabled={relation.targetType !== "asset"}><span>{relation.targetType === "asset" ? <Package size={15} /> : <UserRound size={15} />}</span><b>{label}</b>{relation.note && <small>{relation.note}</small>}</button>
+                        <button type="button" className={styles.textButton} aria-label={`移除关联 ${targetName}`} onClick={() => { setPreviewRelations((current) => current.filter((_, itemIndex) => itemIndex !== index)); setPreviewRelationsDirty(true); }} disabled={!previewingAsset.relationsLoaded}><X size={12} /> 移除</button>
+                      </div>;
+                    })}
+                    {previewRelations.length === 0 && <small>当前资产还没有主动关联其他内容。</small>}
+                  </div>
+                </section>
+                <RelationEditor
+                  characters={characters}
+                  assets={selectableAssets(previewingAsset.id)}
+                  value={previewRelations}
+                  onChange={(relations) => { setPreviewRelations(relations); setPreviewRelationsDirty(true); setPreviewRelationsError(""); }}
+                  disabled={!previewingAsset.relationsLoaded || previewRelationsSaving}
+                  disabledReason={!previewingAsset.relationsLoaded ? "关联数据未完整加载，当前无法安全编辑。请重试资产列表。" : undefined}
+                  legend="添加关联"
+                  showExisting={false}
+                />
+                <section className={styles.relationDirectionSection} aria-labelledby="asset-incoming-relations-title">
+                  <div className={styles.relationSectionHeading}><div><span className={styles.eyebrow}>INCOMING</span><h3 id="asset-incoming-relations-title">被关联</h3></div><span>{previewingAsset.relations.filter((relation) => relation.direction === "incoming").length}</span></div>
+                  <div className={styles.relationDetailList}>
+                    {previewingAsset.relations.filter((relation) => relation.direction === "incoming").map((relation) => {
+                      const label = `${relationDirectionLabel(relation.relationType, "incoming")} · ${relation.targetName}`;
+                      return <div key={`${relation.id}:incoming`}><button type="button" aria-label={label} onClick={() => openRelationTarget(relation)}><span><Package size={15} /></span><b>{label}</b>{relation.note && <small>{relation.note}</small>}</button></div>;
+                    })}
+                    {previewingAsset.relations.every((relation) => relation.direction !== "incoming") && <small>还没有其他资产关联到这里。</small>}
+                  </div>
+                </section>
+                {previewRelationsError && <div className={joinClassNames(styles.notice, styles.noticeError)} role="alert">{previewRelationsError}</div>}
+                <div className={styles.previewRelationActions}>
+                  <button type="button" className={styles.secondaryButton} onClick={() => { setPreviewRelations(outgoingRelationInputs(previewingAsset)); setPreviewRelationsDirty(false); setPreviewRelationsError(""); }} disabled={!previewRelationsDirty || previewRelationsSaving}>取消修改</button>
+                  <button type="button" className={styles.primaryButton} onClick={() => void savePreviewRelations()} disabled={!previewRelationsDirty || previewRelationsSaving || !previewingAsset.relationsLoaded}>{previewRelationsSaving ? <LoaderCircle className={styles.spinner} size={14} /> : <CheckCircle2 size={14} />} 保存关联</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1660,13 +1862,15 @@ export default function AssetManager({
                       </div>
                     </>
                   )}
-                  <RelationFields
+                  <RelationEditor
                     characters={characters}
                     assets={selectableAssets(editing?.id)}
-                    value={form}
-                    onToggle={(kind, targetId, checked) =>
-                      toggleRelation(kind, targetId, checked)
-                    }
+                    value={form.relations}
+                    onChange={updateFormRelations}
+                    disabled={Boolean(editing && !editing.relationsLoaded)}
+                    disabledReason={editing && !editing.relationsLoaded
+                      ? "关联数据未完整加载，当前不会覆盖已有关系。请重试资产列表后再管理关联。"
+                      : undefined}
                   />
                 </fieldset>
                 {formError && (
@@ -1829,13 +2033,11 @@ export default function AssetManager({
                       }
                     />
                   </div>
-                  <RelationFields
+                  <RelationEditor
                     characters={characters}
                     assets={selectableAssets()}
-                    value={generateForm}
-                    onToggle={(kind, targetId, checked) =>
-                      toggleRelation(kind, targetId, checked, true)
-                    }
+                    value={generateForm.relations}
+                    onChange={updateGenerateRelations}
                   />
                 </fieldset>
                 {formError && (
