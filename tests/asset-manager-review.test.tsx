@@ -99,6 +99,41 @@ afterEach(() => {
 });
 
 describe("AssetManager 审查项回归", () => {
+  test("点击资产卡片打开原图预览，并可用 Escape 关闭", async () => {
+    const asset = makeAsset({
+      contentUrl: "/api/projects/project-1/assets/asset-1/content",
+      sourceUrl: "https://example.test/source.png",
+      thumbnailUrl: "https://example.test/thumb.png",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
+        if (url.endsWith("/assets")) return jsonResponse([asset]);
+        if (url.endsWith("/characters") || url === "/api/models") return jsonResponse([]);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+    await user.click(await screen.findByRole("button", { name: "查看资产 雨夜参考图" }));
+
+    const dialog = screen.getByRole("dialog", { name: "雨夜参考图" });
+    expect(within(dialog).getByRole("img", { name: "雨夜参考图 大图预览" })).toHaveAttribute(
+      "src",
+      "/api/projects/project-1/assets/asset-1/content",
+    );
+    expect(within(dialog).getByRole("link", { name: "打开原文件" })).toHaveAttribute(
+      "href",
+      "/api/projects/project-1/assets/asset-1/content",
+    );
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "雨夜参考图" })).toBeNull());
+  });
+
   test("辅助数据失败不会阻断资产，并提供独立重试与可访问筛选", async () => {
     const relations = Array.from({ length: 5 }, (_, index) => ({
       id: `relation-${index}`,

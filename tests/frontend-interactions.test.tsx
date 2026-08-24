@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import Home from "@/app/page";
@@ -62,6 +62,7 @@ function jsonResponse(data: unknown): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  window.localStorage.clear();
 });
 
 describe("关键按钮点击回归", () => {
@@ -110,6 +111,74 @@ describe("关键按钮点击回归", () => {
 
     await user.click(screen.getByRole("button", { name: "刷新数据" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  test("项目切换器整块可点击，并使用站内风格列表切换项目", async () => {
+    const secondProject = {
+      ...workspace.project!,
+      id: "project-2",
+      name: "第二个项目",
+    };
+    const projects = [workspace.project!, secondProject];
+    const initialWorkspace = { ...workspace, projects };
+    const switchedWorkspace: WorkspaceBootstrap = {
+      ...workspace,
+      projects,
+      activeProjectId: secondProject.id,
+      project: secondProject,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/bootstrap") return jsonResponse(initialWorkspace);
+      if (url === "/api/projects/project-2/activate" && init?.method === "POST") {
+        return jsonResponse({ activeProjectId: secondProject.id });
+      }
+      if (url === "/api/bootstrap?projectId=project-2") return jsonResponse(switchedWorkspace);
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    render(<Home />);
+    const switcher = await screen.findByRole("combobox", { name: /当前项目/ });
+    await user.click(switcher);
+
+    expect(screen.getByRole("listbox", { name: "当前项目" })).toBeVisible();
+    expect(screen.getByRole("option", { name: /回归测试项目/ })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("option", { name: /第二个项目/ }));
+
+    await waitFor(() => expect(switcher).toHaveTextContent("第二个项目"));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/project-2/activate",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  test("制作页 Agent 面板支持拖拽和键盘调整宽度", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(workspace)));
+    const user = userEvent.setup();
+
+    const view = render(<Home />);
+    await screen.findByRole("heading", { name: "回归测试项目" });
+    await user.click(
+      within(screen.getByRole("navigation", { name: "项目制作阶段" })).getByRole(
+        "button",
+        { name: /故事设计/ },
+      ),
+    );
+
+    const separator = screen.getByRole("separator", { name: "调整 Agent 面板宽度" });
+    expect(separator).toHaveAttribute("aria-valuenow", "336");
+    fireEvent.keyDown(separator, { key: "ArrowLeft" });
+    expect(separator).toHaveAttribute("aria-valuenow", "352");
+
+    fireEvent.pointerDown(separator, { button: 0, clientX: 700, pointerId: 1 });
+    fireEvent.pointerMove(separator, { clientX: 650, pointerId: 1 });
+    fireEvent.pointerUp(separator, { clientX: 650, pointerId: 1 });
+
+    expect(separator).toHaveAttribute("aria-valuenow", "402");
+    expect(view.container.querySelector(".workspace-layout")).toHaveStyle("--stage-agent-width: 402px");
+    expect(window.localStorage.getItem("frameflow.stageAgentWidth")).toBe("402");
   });
 
   test("ModelCenter 加载数据后点击“添加模型”显示模型 dialog", async () => {

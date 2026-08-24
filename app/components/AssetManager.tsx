@@ -8,6 +8,8 @@ import {
   AlertCircle,
   Box,
   CheckCircle2,
+  ExternalLink,
+  Eye,
   FileText,
   Image as ImageIcon,
   Link2,
@@ -213,6 +215,17 @@ function AssetPreview({ asset }: { asset: ProjectAsset }) {
   );
 }
 
+function assetPreviewSource(asset: ProjectAsset): string | null {
+  return asset.contentUrl || asset.sourceUrl || asset.thumbnailUrl || null;
+}
+
+function formatAssetSize(sizeBytes?: number | null): string | null {
+  if (!sizeBytes || sizeBytes <= 0) return null;
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 const GENERATION_PHASE_LABEL: Record<AssetGenerationJob["phase"], string> = {
   queued: "等待生成服务",
   model: "模型正在生成图片",
@@ -416,6 +429,8 @@ export default function AssetManager({
   );
   const [dialog, setDialog] = useState<DialogMode>(null);
   const [editing, setEditing] = useState<ProjectAsset | null>(null);
+  const [previewingAsset, setPreviewingAsset] = useState<ProjectAsset | null>(null);
+  const [previewLoadFailed, setPreviewLoadFailed] = useState(false);
   const [sourceMode, setSourceMode] = useState<SourceMode>("file");
   const [form, setForm] = useState<AssetForm>(EMPTY_ASSET);
   const [generateForm, setGenerateForm] =
@@ -433,6 +448,7 @@ export default function AssetManager({
   const processingGenerationIds = useRef<Set<string>>(new Set());
   const dismissingGenerationIds = useRef<Set<string>>(new Set());
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const previewCloseRef = useRef<HTMLButtonElement>(null);
   const onAssetsChangeRef = useRef(onAssetsChange);
   useEffect(() => {
     onAssetsChangeRef.current = onAssetsChange;
@@ -654,6 +670,20 @@ export default function AssetManager({
     addEventListener("keydown", listener);
     return () => removeEventListener("keydown", listener);
   }, [dialog, dirty, saving]);
+  useEffect(() => {
+    if (!previewingAsset) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const timer = window.setTimeout(() => previewCloseRef.current?.focus(), 0);
+    const listener = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewingAsset(null);
+    };
+    window.addEventListener("keydown", listener);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", listener);
+      if (previouslyFocused?.isConnected) window.setTimeout(() => previouslyFocused.focus(), 0);
+    };
+  }, [previewingAsset]);
 
   const eligibleModels = useMemo(() => models.filter(isImageModel), [models]);
   const visibleAssets = useMemo(() => {
@@ -680,8 +710,19 @@ export default function AssetManager({
     const history = candidates.filter((generation) => !active.includes(generation)).slice(0, 12);
     return [...active, ...history];
   }, [assets, generations]);
+  const previewSource = previewingAsset ? assetPreviewSource(previewingAsset) : null;
+  const PreviewIcon = previewingAsset
+    ? MEDIA_META[previewingAsset.mediaType]?.icon ?? Package
+    : Package;
+  const previewIsPdf = previewingAsset?.mediaType === "document"
+    && previewingAsset.mimeType?.toLowerCase().includes("pdf");
   const selectableAssets = (currentId?: string) =>
     assets.filter((asset) => asset.id !== currentId);
+
+  function openPreview(asset: ProjectAsset) {
+    setPreviewLoadFailed(false);
+    setPreviewingAsset(asset);
+  }
 
   function openCreate() {
     setEditing(null);
@@ -1308,6 +1349,14 @@ export default function AssetManager({
               {visibleAssets.map((asset) => (
                 <article className={styles.assetCard} key={asset.id}>
                   <AssetPreview asset={asset} />
+                  <button
+                    type="button"
+                    className={styles.assetOpenButton}
+                    aria-label={`查看资产 ${asset.name}`}
+                    onClick={() => openPreview(asset)}
+                  >
+                    <span className={styles.assetOpenHint}><Eye size={14} /> 查看资产</span>
+                  </button>
                   <div className={styles.assetMenu}>
                     <button
                       type="button"
@@ -1370,6 +1419,90 @@ export default function AssetManager({
             </div>
           )}
         </>
+      )}
+      {previewingAsset && (
+        <div
+          className={styles.dialogBackdrop}
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setPreviewingAsset(null);
+          }}
+        >
+          <div
+            className={joinClassNames(styles.dialog, styles.previewDialog)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="asset-preview-title"
+          >
+            <header className={styles.dialogHeader}>
+              <div>
+                <span className={styles.eyebrow}>ASSET PREVIEW</span>
+                <h2 id="asset-preview-title">{previewingAsset.name}</h2>
+                <p>{MEDIA_META[previewingAsset.mediaType].label} · {CATEGORY_META[previewingAsset.category].label}</p>
+              </div>
+              <button
+                ref={previewCloseRef}
+                className={styles.iconButton}
+                type="button"
+                aria-label="关闭资产预览"
+                onClick={() => setPreviewingAsset(null)}
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <div className={styles.previewDialogBody}>
+              <div className={styles.previewViewport}>
+                {previewSource && !previewLoadFailed && previewingAsset.mediaType === "image" && (
+                  <img
+                    src={previewSource}
+                    alt={`${previewingAsset.name} 大图预览`}
+                    onError={() => setPreviewLoadFailed(true)}
+                  />
+                )}
+                {previewSource && !previewLoadFailed && previewingAsset.mediaType === "video" && (
+                  <video src={previewSource} controls onError={() => setPreviewLoadFailed(true)} />
+                )}
+                {previewSource && !previewLoadFailed && previewingAsset.mediaType === "audio" && (
+                  <div className={styles.previewAudio}>
+                    <PreviewIcon size={42} />
+                    <audio src={previewSource} controls onError={() => setPreviewLoadFailed(true)} />
+                  </div>
+                )}
+                {previewSource && !previewLoadFailed && previewIsPdf && (
+                  <iframe src={previewSource} title={`${previewingAsset.name} 文档预览`} />
+                )}
+                {(!previewSource || previewLoadFailed || !["image", "video", "audio"].includes(previewingAsset.mediaType) && !previewIsPdf) && (
+                  <div className={styles.previewFallback}>
+                    <PreviewIcon size={46} />
+                    <b>{previewLoadFailed ? "暂时无法载入预览" : "此类资产暂不支持内嵌预览"}</b>
+                    <span>{previewSource ? "可使用下方按钮打开原文件。" : "该资产尚未关联可查看的文件或地址。"}</span>
+                  </div>
+                )}
+              </div>
+              <div className={styles.previewMetaBar}>
+                <div>
+                  <div className={styles.previewBadges}>
+                    <span className={styles.sourceBadge}>{MEDIA_META[previewingAsset.mediaType].label}</span>
+                    <span className={styles.levelBadge}>{CATEGORY_META[previewingAsset.category].label}</span>
+                    <span className={styles.statusBadge}>{assetStatusLabel(previewingAsset)}</span>
+                    {formatAssetSize(previewingAsset.sizeBytes) && <span>{formatAssetSize(previewingAsset.sizeBytes)}</span>}
+                  </div>
+                  <p>{previewingAsset.description || "暂无资产描述"}</p>
+                </div>
+                {previewSource && (
+                  <a
+                    className={joinClassNames(styles.secondaryButton, styles.previewOpenLink)}
+                    href={previewSource}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLink size={14} /> 打开原文件
+                  </a>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
       {dialog === "asset" && (
         <div

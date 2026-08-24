@@ -3,6 +3,11 @@
 /* eslint-disable @next/next/no-img-element -- project assets can use authenticated or user-configured URLs. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertCircle,
@@ -64,6 +69,13 @@ type ViewId =
   | "agent"
   | "delivery"
   | "models";
+
+const AGENT_PANEL_MIN_WIDTH = 280;
+const AGENT_PANEL_MAX_WIDTH = 560;
+const AGENT_PANEL_DEFAULT_WIDTH = 336;
+const WORKSPACE_MIN_WIDTH = 440;
+const AGENT_RESIZER_WIDTH = 10;
+const AGENT_PANEL_STORAGE_KEY = "frameflow.stageAgentWidth";
 
 type NavItem = {
   id: ViewId;
@@ -580,9 +592,46 @@ export default function Home() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [projectSwitcherOpen, setProjectSwitcherOpen] = useState(false);
+  const [agentPanelWidth, setAgentPanelWidth] = useState(AGENT_PANEL_DEFAULT_WIDTH);
+  const [agentPanelResizing, setAgentPanelResizing] = useState(false);
   const workspaceRequestSequence = useRef(0);
   const workspaceTargetProjectId = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const projectSwitcherRef = useRef<HTMLDivElement>(null);
+  const projectSwitcherButtonRef = useRef<HTMLButtonElement>(null);
+  const projectOptionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const workspaceLayoutRef = useRef<HTMLDivElement>(null);
+  const agentPanelWidthRef = useRef(AGENT_PANEL_DEFAULT_WIDTH);
+  const agentResizeStartRef = useRef<{ x: number; width: number } | null>(null);
+
+  const clampAgentPanelWidth = useCallback((requestedWidth: number) => {
+    const measuredWidth = workspaceLayoutRef.current?.getBoundingClientRect().width ?? 0;
+    const layoutWidth = measuredWidth > 0 ? measuredWidth : window.innerWidth;
+    const responsiveMax = Math.max(
+      AGENT_PANEL_MIN_WIDTH,
+      Math.min(
+        AGENT_PANEL_MAX_WIDTH,
+        layoutWidth - WORKSPACE_MIN_WIDTH - AGENT_RESIZER_WIDTH,
+      ),
+    );
+    return Math.round(
+      Math.min(responsiveMax, Math.max(AGENT_PANEL_MIN_WIDTH, requestedWidth)),
+    );
+  }, []);
+
+  const updateAgentPanelWidth = useCallback((requestedWidth: number, persist = false) => {
+    const nextWidth = clampAgentPanelWidth(requestedWidth);
+    agentPanelWidthRef.current = nextWidth;
+    setAgentPanelWidth(nextWidth);
+    if (persist) {
+      try {
+        window.localStorage.setItem(AGENT_PANEL_STORAGE_KEY, String(nextWidth));
+      } catch {
+        // The layout still works when browser storage is unavailable.
+      }
+    }
+  }, [clampAgentPanelWidth]);
 
   const loadWorkspace = useCallback(async (projectId?: string, quiet = false) => {
     if (projectId && workspaceTargetProjectId.current && projectId !== workspaceTargetProjectId.current) return false;
@@ -616,6 +665,33 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [loadWorkspace]);
 
+  useEffect(() => {
+    try {
+      const storedWidth = Number(window.localStorage.getItem(AGENT_PANEL_STORAGE_KEY));
+      if (Number.isFinite(storedWidth) && storedWidth > 0) {
+        updateAgentPanelWidth(storedWidth);
+      }
+    } catch {
+      // Use the default width when browser storage is unavailable.
+    }
+    const handleResize = () => {
+      if (window.innerWidth > 1020) updateAgentPanelWidth(agentPanelWidthRef.current);
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [updateAgentPanelWidth]);
+
+  useEffect(() => {
+    if (!projectSwitcherOpen) return;
+    const handleOutsidePointer = (event: PointerEvent) => {
+      if (!projectSwitcherRef.current?.contains(event.target as Node)) {
+        setProjectSwitcherOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handleOutsidePointer);
+    return () => document.removeEventListener("pointerdown", handleOutsidePointer);
+  }, [projectSwitcherOpen]);
+
   const navigate = useCallback((view: ViewId) => {
     if (view === "agent") setSelectedAgentRunId(null);
     setActiveView(view);
@@ -623,6 +699,7 @@ export default function Home() {
     setSearchOpen(false);
     setNotificationsOpen(false);
     setUserMenuOpen(false);
+    setProjectSwitcherOpen(false);
   }, []);
   const currentCopy = viewCopy[activeView];
   const project = data?.project ?? null;
@@ -674,14 +751,81 @@ export default function Home() {
         setSearchOpen(false);
         setNotificationsOpen(false);
         setUserMenuOpen(false);
+        setProjectSwitcherOpen(false);
       }
     }
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, []);
 
+  function focusProjectOption(index: number) {
+    const projects = data?.projects ?? [];
+    if (projects.length === 0) return;
+    const boundedIndex = (index + projects.length) % projects.length;
+    projectOptionRefs.current.get(projects[boundedIndex].id)?.focus();
+  }
+
+  function handleProjectSwitcherKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    setProjectSwitcherOpen(true);
+    const selectedIndex = Math.max(
+      0,
+      (data?.projects ?? []).findIndex((item) => item.id === data?.activeProjectId),
+    );
+    window.requestAnimationFrame(() => {
+      focusProjectOption(event.key === "ArrowDown" ? selectedIndex : selectedIndex - 1);
+    });
+  }
+
+  function handleProjectOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusProjectOption(index + (event.key === "ArrowDown" ? 1 : -1));
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      focusProjectOption(event.key === "Home" ? 0 : (data?.projects.length ?? 1) - 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setProjectSwitcherOpen(false);
+      projectSwitcherButtonRef.current?.focus();
+    }
+  }
+
+  function startAgentResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    agentResizeStartRef.current = { x: event.clientX, width: agentPanelWidthRef.current };
+    setAgentPanelResizing(true);
+  }
+
+  function moveAgentResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = agentResizeStartRef.current;
+    if (!start) return;
+    updateAgentPanelWidth(start.width + start.x - event.clientX);
+  }
+
+  function finishAgentResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!agentResizeStartRef.current) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    agentResizeStartRef.current = null;
+    setAgentPanelResizing(false);
+    updateAgentPanelWidth(agentPanelWidthRef.current, true);
+  }
+
+  function handleAgentResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    updateAgentPanelWidth(
+      agentPanelWidthRef.current + (event.key === "ArrowLeft" ? 16 : -16),
+      true,
+    );
+  }
+
   async function switchProject(projectId: string) {
     if (!projectId || projectId === data?.activeProjectId || switchingProject || refreshing) return;
+    setProjectSwitcherOpen(false);
     setSwitchingProject(true);
     setSelectedAgentRunId(null);
     workspaceTargetProjectId.current = projectId;
@@ -701,9 +845,64 @@ export default function Home() {
       <div className={`mobile-scrim ${mobileNavOpen ? "visible" : ""}`} onClick={() => setMobileNavOpen(false)} />
       <aside className={`sidebar ${mobileNavOpen ? "open" : ""}`}>
         <div className="brand-lockup"><div className="brand-mark"><span /><span /></div><div><b>影序</b><small>FRAMEFLOW</small></div><button className="sidebar-close" aria-label="关闭菜单" onClick={() => setMobileNavOpen(false)}><X size={18} /></button></div>
-        <div className="db-project-switcher">
-          <label htmlFor="project-switcher">当前项目</label>
-          <div><span className="project-avatar">{project?.name?.slice(0, 1) || "项"}</span><select id="project-switcher" value={data?.activeProjectId ?? ""} disabled={!data || switchingProject || refreshing} onChange={(event) => void switchProject(event.target.value)}>{data?.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>{switchingProject || refreshing ? <LoaderCircle className="spin" size={15} /> : <ChevronDown size={15} />}</div>
+        <div
+          ref={projectSwitcherRef}
+          className={`db-project-switcher ${projectSwitcherOpen ? "open" : ""}`}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setProjectSwitcherOpen(false);
+            }
+          }}
+        >
+          <span id="project-switcher-label" className="project-switcher-label">当前项目</span>
+          <div className="project-picker-shell">
+            <button
+              ref={projectSwitcherButtonRef}
+              id="project-switcher"
+              type="button"
+              className="project-picker-trigger"
+              role="combobox"
+              aria-haspopup="listbox"
+              aria-expanded={projectSwitcherOpen}
+              aria-controls="project-switcher-options"
+              aria-labelledby="project-switcher-label project-switcher-value"
+              disabled={!data || switchingProject || refreshing}
+              onClick={() => setProjectSwitcherOpen((current) => !current)}
+              onKeyDown={handleProjectSwitcherKeyDown}
+            >
+              <span className="project-avatar">{project?.name?.slice(0, 1) || "项"}</span>
+              <span id="project-switcher-value" className="project-picker-name">{project?.name || "选择项目"}</span>
+              {switchingProject || refreshing ? <LoaderCircle className="spin" size={15} /> : <ChevronDown className="project-picker-chevron" size={16} />}
+            </button>
+            {projectSwitcherOpen && (
+              <div id="project-switcher-options" className="project-picker-options" role="listbox" aria-labelledby="project-switcher-label">
+                {data?.projects.map((item, index) => {
+                  const selected = item.id === data.activeProjectId;
+                  return (
+                    <button
+                      key={item.id}
+                      ref={(node) => {
+                        if (node) projectOptionRefs.current.set(item.id, node);
+                        else projectOptionRefs.current.delete(item.id);
+                      }}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      onKeyDown={(event) => handleProjectOptionKeyDown(event, index)}
+                      onClick={() => {
+                        setProjectSwitcherOpen(false);
+                        void switchProject(item.id);
+                      }}
+                    >
+                      <span>{item.name.slice(0, 1) || "项"}</span>
+                      <b>{item.name}</b>
+                      {selected && <Check size={14} />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <button type="button" onClick={() => setNewProjectOpen(true)} disabled={switchingProject || refreshing}><Plus size={14} /> 新建项目</button>
         </div>
         <div className="nav-label">项目制作流程</div>
@@ -719,7 +918,11 @@ export default function Home() {
 
       <div className="app-stage">
         <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="打开项目导航" onClick={() => setMobileNavOpen(true)}><Menu size={19} /></button><div className="breadcrumb"><span>{activeView === "models" ? "跨项目" : project?.name || "项目"}</span><ChevronRight size={13} /><b>{currentCopy.title}</b></div></div><div className="topbar-center" onFocus={() => setSearchOpen(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSearchOpen(false); }}><Search size={15} /><input ref={searchInputRef} role="combobox" aria-autocomplete="list" aria-haspopup="listbox" value={search} onChange={(event) => { setSearch(event.target.value); setSearchOpen(true); }} aria-label="搜索项目内容" aria-controls="workspace-search-results" aria-expanded={searchOpen && Boolean(search.trim())} placeholder="搜索人物、剧本、资产或 Agent 记录" /><kbd>⌘ K</kbd>{searchOpen && search.trim() && <div id="workspace-search-results" className="search-results" role="listbox" aria-label="搜索结果">{searchResults.length > 0 ? searchResults.map((result) => <button type="button" role="option" aria-selected="false" key={result.id} onClick={() => openSearchResult(result)}><span><b>{result.title}</b><small>{result.detail}</small></span><ChevronRight size={14} /></button>) : <div className="search-empty" role="status">当前项目没有匹配内容</div>}</div>}</div><div className="topbar-right"><span className="database-pill"><Database size={12} /> {refreshing ? "正在同步" : "数据已持久化"}</span><button className="icon-button" aria-label={refreshing ? "正在刷新数据" : "刷新数据"} onClick={() => void loadWorkspace(workspaceTargetProjectId.current ?? data?.activeProjectId ?? undefined, true)} disabled={loading || refreshing || switchingProject}>{refreshing ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}</button><div className="notification-control"><button className="icon-button" type="button" aria-label="查看通知" aria-expanded={notificationsOpen} aria-controls="notification-panel" onClick={() => { setNotificationsOpen((current) => !current); setUserMenuOpen(false); }}><Bell size={16} /></button>{notificationsOpen && <div id="notification-panel" className="shell-popover notification-popover" role="dialog" aria-label="通知"><div><b>工作区状态</b><button type="button" className="popover-close" aria-label="关闭通知" onClick={() => setNotificationsOpen(false)}><X size={14} /></button></div><p>{error ? `最近一次同步失败：${error}` : `当前项目有 ${data?.agentRuns.length ?? 0} 条 Agent 记录、${data?.assets.length ?? 0} 项资产。`}</p><small>{refreshing ? "正在获取最新数据…" : "暂无其他未读通知"}</small></div>}</div></div></header>
-        <div className={`workspace-layout ${stageAgentStage ? "" : "assistant-hidden"}`}>
+        <div
+          ref={workspaceLayoutRef}
+          className={`workspace-layout ${stageAgentStage ? "" : "assistant-hidden"} ${agentPanelResizing ? "agent-resizing" : ""}`}
+          style={{ "--stage-agent-width": `${agentPanelWidth}px` } as CSSProperties}
+        >
         <main className="main-workspace full-width-workspace">
           {loading ? <LoadingWorkspace /> : error && !data ? <div className="platform-state error-state"><AlertCircle size={24} /><div><b>无法连接后端</b><span>{error}</span><button className="quiet-button" onClick={() => void loadWorkspace()}><RefreshCw size={14} /> 重试</button></div></div> : data && project ? <>
             <div className="page-heading"><div><span className="page-kicker">{currentCopy.kicker}</span><div className="title-row"><h1>{currentCopy.title}</h1><span className="version-badge">{activeView === "models" ? "跨项目通用" : project.name}</span></div><p>{currentCopy.description}</p></div><div className="heading-actions">{stageAgentStage ? <button className="quiet-button stage-agent-focus" onClick={() => document.getElementById("stage-agent-input")?.focus()}><Bot size={15} /> 使用本页 Agent</button> : activeView !== "agent" && activeView !== "models" && <button className="quiet-button" onClick={() => navigate("agent")}><Bot size={15} /> 交给 Agent</button>}{activeView !== "models" && activeView !== "assets" && <button className="primary-button" onClick={() => navigate("assets")}><Plus size={15} /> 添加资产</button>}</div></div>
@@ -736,6 +939,22 @@ export default function Home() {
             {activeView === "models" && <ModelCenter refreshKey={refreshKey} onModelsChange={(models: AiModel[]) => setData((current) => current ? { ...current, models } : current)} />}
           </> : null}
         </main>
+        {data && project && stageAgentStage && <div
+          className="agent-resizer"
+          role="separator"
+          aria-label="调整 Agent 面板宽度"
+          aria-orientation="vertical"
+          aria-valuemin={AGENT_PANEL_MIN_WIDTH}
+          aria-valuemax={AGENT_PANEL_MAX_WIDTH}
+          aria-valuenow={agentPanelWidth}
+          tabIndex={0}
+          onDoubleClick={() => updateAgentPanelWidth(AGENT_PANEL_DEFAULT_WIDTH, true)}
+          onKeyDown={handleAgentResizeKeyDown}
+          onPointerDown={startAgentResize}
+          onPointerMove={moveAgentResize}
+          onPointerUp={finishAgentResize}
+          onPointerCancel={finishAgentResize}
+        ><span /></div>}
         {data && project && stageAgentStage && <StageAgentPanel
           key={`${project.id}-${stageAgentStage}`}
           projectId={project.id}
