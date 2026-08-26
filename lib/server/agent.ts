@@ -177,8 +177,15 @@ export function modelSupportsTextAgent(model: Record<string, unknown>): boolean 
     : [];
   const textCapability = capabilities.some((value) => /^(?:text|analysis|chat|chat-completions|text-analysis|text-generation|文本|文本分析|文本生成|剧本创作)$/.test(value));
   const videoCapability = capabilities.some((value) => /^(?:video|video-generation|video_generation|text-to-video|image-to-video|视频|视频生成|图生视频)$/.test(value));
+  const imageGenerationCapability = capabilities.some((value) => [
+    "image-generation",
+    "image_generation",
+    "text-to-image",
+    "图片生成",
+    "图像生成",
+  ].includes(value));
   if (textCapability) return true;
-  if (videoCapability) return false;
+  if (videoCapability || imageGenerationCapability) return false;
   return !/seedance|text[-_ ]?to[-_ ]?video|video[-_ ]?(?:gen|generation)|视频生成|图生视频/i.test(
     `${String(model.provider ?? "")} ${String(model.name ?? "")} ${String(model.model_id ?? model.modelId ?? "")}`,
   );

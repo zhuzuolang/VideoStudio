@@ -1,2 +1,4 @@
 # Local development only. Generate a unique random value of at least 32 characters.
 MODEL_KEY_ENCRYPTION_SECRET=replace-with-a-long-random-secret
+# Local development only. Never enable this on a deployed Site.
+ALLOW_LOCAL_MODEL_ENDPOINTS=true

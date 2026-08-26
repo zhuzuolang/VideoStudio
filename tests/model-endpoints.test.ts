@@ -2,8 +2,10 @@ import { describe, expect, test, vi } from "vitest";
 
 vi.mock("@/lib/server/runtime", () => ({ mediaBucket: vi.fn(), bindings: vi.fn(), database: vi.fn() }));
 
-import { chatCompletionsEndpoint } from "@/lib/server/agent";
+import { chatCompletionsEndpoint, modelSupportsTextAgent } from "@/lib/server/agent";
 import { buildImageGenerationRequest, defaultImageSize, imageGenerationEndpoint, modelSupportsImageGeneration } from "@/lib/server/image-generation";
+import { validateModelEndpoint, validatePublicHttpsUrl } from "@/lib/server/outbound";
+import { bindings } from "@/lib/server/runtime";
 
 describe("OpenAI-compatible 模型路径归一化", () => {
   test.each([
@@ -13,6 +15,26 @@ describe("OpenAI-compatible 模型路径归一化", () => {
     ["https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/chat/completions"],
   ])("聊天根地址 %s 会得到 %s", (configured, expected) => {
     expect(chatCompletionsEndpoint(configured)).toBe(expected);
+  });
+
+  test("显式启用时仅允许回环地址作为本地模型端点", async () => {
+    vi.mocked(bindings).mockReturnValue({ ALLOW_LOCAL_MODEL_ENDPOINTS: "true" });
+
+    await expect(validateModelEndpoint("http://127.0.0.1:8317/v1")).resolves.toBe("http://127.0.0.1:8317/v1");
+    await expect(validateModelEndpoint("http://localhost:8317/v1")).resolves.toBe("http://localhost:8317/v1");
+    await expect(validateModelEndpoint("http://192.168.1.8:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+    await expect(validatePublicHttpsUrl("http://127.0.0.1:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+  });
+
+  test("未启用本地端点开关时仍拒绝回环地址", async () => {
+    vi.mocked(bindings).mockReturnValue({});
+    await expect(validateModelEndpoint("http://127.0.0.1:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+  });
+
+  test("纯图像生成模型不会被识别为文本 Agent", () => {
+    const parameters_json = JSON.stringify({ capabilities: ["image-generation", "text-to-image"] });
+    expect(modelSupportsTextAgent({ model_id: "gpt-image-2", parameters_json })).toBe(false);
+    expect(modelSupportsTextAgent({ model_id: "gpt-5.4", parameters_json: JSON.stringify({ capabilities: ["text", "analysis"] }) })).toBe(true);
   });
 
   test.each([

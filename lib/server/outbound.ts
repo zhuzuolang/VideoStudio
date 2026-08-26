@@ -1,4 +1,5 @@
 import { ApiError } from "./api";
+import { bindings } from "./runtime";
 
 const FORBIDDEN_HOSTS = new Set([
   "localhost",
@@ -9,7 +10,35 @@ const FORBIDDEN_HOSTS = new Set([
 ]);
 
 export async function validateModelEndpoint(value: string): Promise<string> {
+  const localEndpoint = localDevelopmentModelEndpoint(value);
+  if (localEndpoint) return localEndpoint;
   return validatePublicHttpsUrl(value, { allowQuery: false, purpose: "模型地址" });
+}
+
+export function localDevelopmentModelEndpoint(value: string): string | null {
+  const enabled = bindings()?.ALLOW_LOCAL_MODEL_ENDPOINTS?.trim().toLowerCase() === "true";
+  if (!enabled) return null;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (
+    !["http:", "https:"].includes(url.protocol)
+    || !["127.0.0.1", "localhost", "::1"].includes(hostname)
+    || url.username
+    || url.password
+    || url.hash
+    || url.search
+  ) {
+    return null;
+  }
+
+  return url.toString();
 }
 
 export async function validatePublicHttpsUrl(

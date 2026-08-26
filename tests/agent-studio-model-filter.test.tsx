@@ -29,6 +29,14 @@ const videoModel: AiModel = {
   parameters: { capabilities: ["video-generation", "text-to-video", "image-to-video"] },
 };
 
+const imageModel: AiModel = {
+  ...textModel,
+  id: "model-image",
+  name: "GPT Image 2",
+  modelId: "gpt-image-2",
+  parameters: { capabilities: ["image-generation", "text-to-image"] },
+};
+
 function dataResponse(data: unknown): Response {
   return new Response(JSON.stringify({ data }), {
     status: 200,
@@ -58,7 +66,7 @@ afterEach(() => {
 
 describe("文本 Agent 模型过滤", () => {
   test("纯视频生成模型不会出现在执行模型列表中", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => dataResponse(workspace([videoModel, textModel]))));
+    vi.stubGlobal("fetch", vi.fn(async () => dataResponse(workspace([videoModel, imageModel, textModel]))));
 
     render(<AgentStudio projectId="project-1" />);
 
@@ -66,6 +74,7 @@ describe("文本 Agent 模型过滤", () => {
     expect(select).toHaveValue(textModel.id);
     expect(within(select).getByRole("option", { name: /文本创作模型/ })).toBeVisible();
     expect(within(select).queryByRole("option", { name: /Seedance 视频生成/ })).not.toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: /GPT Image 2/ })).not.toBeInTheDocument();
   });
 
   test("只有纯视频模型时提示配置文本模型", async () => {

@@ -112,16 +112,19 @@ const TEXT_AGENT_CAPABILITIES = new Set([
 
 function isTextAgentModel(model: AiModel): boolean {
   const capabilities = getModelCapabilities(model).map((capability) => capability.trim().toLocaleLowerCase("en-US"));
-  const isVideoModel = capabilities.some((capability) =>
+  const isGenerationOnlyModel = capabilities.some((capability) =>
     capability === "video"
     || capability === "video-generation"
     || capability === "video_generation"
     || capability === "text-to-video"
     || capability === "image-to-video"
+    || capability === "image-generation"
+    || capability === "image_generation"
+    || capability === "text-to-image"
     || capability === "视频"
     || capability === "视频生成",
   );
-  if (!isVideoModel) return true;
+  if (!isGenerationOnlyModel) return true;
   return capabilities.some((capability) => TEXT_AGENT_CAPABILITIES.has(capability));
 }
 

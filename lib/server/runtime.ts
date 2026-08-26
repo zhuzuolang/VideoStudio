@@ -5,6 +5,7 @@ export type RuntimeBindings = {
   DB?: D1Database;
   MEDIA?: R2Bucket;
   MODEL_KEY_ENCRYPTION_SECRET?: string;
+  ALLOW_LOCAL_MODEL_ENDPOINTS?: string;
 };
 
 export function bindings(): RuntimeBindings {

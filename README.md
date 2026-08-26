@@ -24,6 +24,8 @@ npm run dev
 
 Sites 私有站点会注入当前登录用户身份。直接请求本地 API 时，需要提供 `oai-authenticated-user-id` 与 `oai-authenticated-user-email` 请求头。若要在本地保存模型密钥，请复制 `.dev.vars.example` 为 `.dev.vars`，并换成至少 32 个字符的随机密钥；不要提交该文件。
 
+本地开发连接回环模型服务时，可在 `.dev.vars` 设置 `ALLOW_LOCAL_MODEL_ENDPOINTS=true`。该开关只放行 `localhost`、`127.0.0.1` 与 `::1`，不要配置到部署环境；Sites 云端也无法访问开发电脑上的回环地址。
+
 发布前可运行：
 
 ```bash
