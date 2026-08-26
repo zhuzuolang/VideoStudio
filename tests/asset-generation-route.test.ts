@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   generate: vi.fn(),
   supportsImages: vi.fn(() => true),
   supportsVideos: vi.fn(() => true),
+  seedanceRequestProfile: vi.fn(() => ({ profile: { maxReferenceImages: 30 }, preset: {} })),
   buildVideoRequest: vi.fn(() => ({})),
   createVideoTask: vi.fn(),
   getVideoTask: vi.fn(),
@@ -26,6 +27,10 @@ const mocks = vi.hoisted(() => ({
   persistProviderTask: vi.fn(),
   releaseForPolling: vi.fn(),
   generationFailure: vi.fn(() => ({ code: "IMAGE_PROCESSING_FAILED", message: "图片生成处理发生内部错误，请稍后重试。", retryable: true })),
+  parseReferenceAssets: vi.fn((value: unknown) => value ?? []),
+  validateReferenceProfile: vi.fn(),
+  validateReferenceAssets: vi.fn(),
+  resolveReferenceAssets: vi.fn(),
 }));
 
 const prepared: Array<{ sql: string; values: unknown[] }> = [];
@@ -58,10 +63,17 @@ vi.mock("@/lib/server/image-generation", () => ({
 }));
 vi.mock("@/lib/server/video-generation", () => ({
   modelSupportsVideoGeneration: mocks.supportsVideos,
+  seedanceRequestProfile: mocks.seedanceRequestProfile,
   buildVideoGenerationRequest: mocks.buildVideoRequest,
   createVideoGenerationTask: mocks.createVideoTask,
   getVideoGenerationTask: mocks.getVideoTask,
   openGeneratedVideoStream: mocks.downloadVideo,
+}));
+vi.mock("@/lib/server/video-reference-assets", () => ({
+  parseVideoReferenceAssets: mocks.parseReferenceAssets,
+  validateVideoReferenceProfile: mocks.validateReferenceProfile,
+  validateVideoReferenceAssets: mocks.validateReferenceAssets,
+  resolveVideoReferenceAssets: mocks.resolveReferenceAssets,
 }));
 vi.mock("@/lib/server/store", () => ({
   prepareGeneratedAssetRelationStatements: mocks.prepareRelations,
@@ -134,6 +146,7 @@ beforeEach(() => {
     revisedPrompt: null,
   });
   mocks.createVideoTask.mockResolvedValue({ taskId: "cgt-created" });
+  mocks.resolveReferenceAssets.mockResolvedValue([]);
   mocks.getVideoTask.mockResolvedValue({
     status: "succeeded",
     videoUrl: "https://cdn.example.test/generated.mp4?signature=hidden",
@@ -176,7 +189,11 @@ test("创建接口只持久化任务并立即返回 202，不等待模型或 R2"
   expect(mocks.put).not.toHaveBeenCalled();
 });
 
-test("创建视频任务会保存独立参数 profile，包括智能时长与参考图", async () => {
+test("创建视频任务会按选择顺序保存项目参考图，并校验其模型 profile 与资产归属", async () => {
+  const referenceImages = [
+    { assetId: "asset-street", role: "reference_image" },
+    { assetId: "asset-character", role: "reference_image" },
+  ] as const;
   const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/route");
   const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate", {
     method: "POST",
@@ -192,8 +209,7 @@ test("创建视频任务会保存独立参数 profile，包括智能时长与参
         resolution: "1080p",
         duration: -1,
         generateAudio: true,
-        referenceImageUrl: "https://cdn.example.test/first-frame.png",
-        referenceImageRole: "first_frame",
+        referenceImages,
       },
     }),
   }), { params: Promise.resolve({ projectId: "project-1" }) });
@@ -201,14 +217,20 @@ test("创建视频任务会保存独立参数 profile，包括智能时长与参
   expect(response.status).toBe(202);
   expect(mocks.supportsVideos).toHaveBeenCalledOnce();
   expect(mocks.supportsImages).not.toHaveBeenCalled();
+  expect(mocks.parseReferenceAssets).toHaveBeenCalledWith(referenceImages);
+  expect(mocks.seedanceRequestProfile).toHaveBeenCalledWith(expect.objectContaining({ id: "mdl-1" }));
+  expect(mocks.validateReferenceProfile).toHaveBeenCalledWith(
+    referenceImages,
+    expect.objectContaining({ maxReferenceImages: 30 }),
+  );
+  expect(mocks.validateReferenceAssets).toHaveBeenCalledWith(fakeDb, "project-1", referenceImages);
   const insert = prepared.find((item) => item.sql.includes("INSERT INTO asset_generation_jobs"));
   expect(insert?.values[6]).toBe("video");
   expect(JSON.parse(String(insert?.values[12]))).toEqual({
     resolution: "1080p",
     duration: -1,
     generateAudio: true,
-    referenceImageUrl: "https://cdn.example.test/first-frame.png",
-    referenceImageRole: "first_frame",
+    referenceImages,
   });
 });
 
@@ -250,12 +272,21 @@ test("执行失败会持久化安全错误，卡片可从数据库恢复", async
   expect(mocks.put).not.toHaveBeenCalled();
 });
 
-test("视频首次执行只创建一次供应商任务并持久化任务号", async () => {
+test("视频首次执行按序解析项目参考图，只创建一次供应商任务并持久化任务号", async () => {
+  const referenceImages = [
+    { assetId: "asset-street", role: "reference_image" },
+    { assetId: "asset-character", role: "reference_image" },
+  ] as const;
+  const resolvedReferenceImages = [
+    { url: "data:image/png;base64,c3RyZWV0", role: "reference_image" },
+    { url: "https://cdn.example.test/character.png", role: "reference_image" },
+  ] as const;
+  mocks.resolveReferenceAssets.mockResolvedValueOnce(resolvedReferenceImages);
   mocks.getGeneration.mockResolvedValue({
     ...generation,
     mediaType: "video",
     modelName: "Seedance 2.5",
-    options: { resolution: "720p", duration: 8, generateAudio: true },
+    options: { resolution: "720p", duration: 8, generateAudio: true, referenceImages },
   });
   const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
   const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
@@ -265,11 +296,18 @@ test("视频首次执行只创建一次供应商任务并持久化任务号", as
   }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
 
   expect(response.status).toBe(202);
+  expect(mocks.resolveReferenceAssets).toHaveBeenCalledWith(
+    fakeDb,
+    expect.objectContaining({ put: mocks.put }),
+    "project-1",
+    referenceImages,
+  );
   expect(mocks.buildVideoRequest).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
     prompt: "电影感角色设定",
     resolution: "720p",
     duration: 8,
     generateAudio: true,
+    referenceImages: resolvedReferenceImages,
   }));
   expect(mocks.createVideoTask).toHaveBeenCalledOnce();
   expect(mocks.persistProviderTask).toHaveBeenCalledWith(
@@ -284,13 +322,17 @@ test("视频首次执行只创建一次供应商任务并持久化任务号", as
 });
 
 test("视频轮询中的任务释放租约，且不会重复创建供应商任务", async () => {
+  const referenceImages = [
+    { assetId: "asset-street", role: "reference_image" },
+    { assetId: "asset-character", role: "reference_image" },
+  ] as const;
   mocks.getGeneration.mockResolvedValue({
     ...generation,
     mediaType: "video",
     providerTaskId: "cgt-existing",
     status: "running",
     progress: 35,
-    options: { resolution: "720p", duration: 8 },
+    options: { resolution: "720p", duration: 8, referenceImages },
   });
   mocks.getVideoTask.mockResolvedValueOnce({ status: "running" });
   const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
@@ -301,6 +343,8 @@ test("视频轮询中的任务释放租约，且不会重复创建供应商任�
   }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
 
   expect(response.status).toBe(202);
+  expect(mocks.resolveReferenceAssets).not.toHaveBeenCalled();
+  expect(mocks.buildVideoRequest).not.toHaveBeenCalled();
   expect(mocks.createVideoTask).not.toHaveBeenCalled();
   expect(mocks.getVideoTask).toHaveBeenCalledWith(expect.any(Object), "cgt-existing");
   expect(mocks.releaseForPolling).toHaveBeenCalledWith(

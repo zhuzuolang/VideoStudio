@@ -738,6 +738,10 @@
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.25);
 }
 
+.generateDialog {
+  width: min(820px, 100%);
+}
+
 .dialogHeader,
 .dialogFooter {
   display: flex;
@@ -1157,6 +1161,148 @@
   padding: 12px;
   border: 1px solid var(--module-line);
   border-radius: 10px;
+}
+
+.referenceAssetEditor {
+  gap: 11px;
+  background: color-mix(in srgb, var(--module-soft) 42%, var(--module-paper));
+}
+
+.referenceAssetToolbar {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.8fr) minmax(260px, 1.2fr);
+  gap: 10px;
+}
+
+.referenceAssetToolbar .field > span {
+  color: var(--module-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.referenceAssetSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--module-muted);
+  font-size: 9px;
+}
+
+.referenceAssetSummary > span {
+  flex: 0 0 auto;
+  color: var(--module-ink);
+  font-weight: 650;
+}
+
+.referenceAssetSummary small {
+  text-align: right;
+}
+
+.referenceAssetList {
+  display: grid;
+  gap: 7px;
+}
+
+.referenceAssetItem {
+  display: grid;
+  grid-template-columns: 58px 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 62px;
+  padding: 7px 9px;
+  border: 1px solid var(--module-line);
+  border-radius: 9px;
+  background: var(--module-paper);
+}
+
+.referenceAssetIndex {
+  justify-self: start;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--module-accent-strong);
+  background: var(--module-accent-soft);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.referenceAssetThumbnail {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border-radius: 8px;
+  color: var(--module-muted);
+  background: var(--module-soft);
+}
+
+.referenceAssetThumbnail img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.referenceAssetMeta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.referenceAssetMeta b,
+.referenceAssetMeta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.referenceAssetMeta b {
+  font-size: 10px;
+}
+
+.referenceAssetMeta small {
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.referenceAssetActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.referenceAssetActions .iconButton {
+  width: 30px;
+  min-height: 30px;
+}
+
+@media (pointer: coarse) {
+  .referenceAssetActions .iconButton {
+    width: 38px;
+    min-height: 38px;
+  }
+}
+
+.referenceAssetActions .textButton {
+  min-height: 30px;
+}
+
+.referenceAssetEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 64px;
+  padding: 14px;
+  color: var(--module-muted);
+  border: 1px dashed var(--module-line-strong);
+  border-radius: 9px;
+  background: var(--module-paper);
+  font-size: 9px;
 }
 
 .toggleRow {
@@ -2138,6 +2284,7 @@
   }
 
   .assetHeaderActions,
+  .referenceAssetToolbar,
   .relationComposer,
   .filterGroup {
     display: grid;
@@ -2147,6 +2294,24 @@
   .relationAddRow,
   .relationDetailList > div {
     grid-template-columns: 1fr;
+  }
+
+  .referenceAssetSummary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .referenceAssetSummary small {
+    text-align: left;
+  }
+
+  .referenceAssetItem {
+    grid-template-columns: auto 48px minmax(0, 1fr);
+  }
+
+  .referenceAssetActions {
+    grid-column: 2 / -1;
+    justify-content: flex-end;
   }
 
   .previewRelationActions {

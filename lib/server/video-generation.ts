@@ -205,6 +205,15 @@ export function buildVideoGenerationRequest(
   }
 
   const images = collectReferenceImages(input);
+  validateReferenceImageMode(images);
+  const generalReferences = images.filter((image) => image.role === "reference_image");
+  if (generalReferences.length > profile.maxReferenceImages) {
+    throw new ApiError(
+      400,
+      "TOO_MANY_VIDEO_REFERENCES",
+      `当前模型最多接收 ${profile.maxReferenceImages} 张内容参考图。`,
+    );
+  }
   const content: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
   for (const image of images) {
     if (!profile.referenceImageRoles.includes(image.role)) {
@@ -612,7 +621,7 @@ function collectReferenceImages(input: VideoGenerationInput): Array<{ url: strin
       ? { url: image.trim(), role: "reference_image" }
       : { url: image.url.trim(), role: image.role ?? "reference_image" });
   }
-  if (images.length > 50) throw new ApiError(400, "TOO_MANY_VIDEO_REFERENCES", "单次视频任务最多接收 50 张参考图。");
+  if (images.length > 30) throw new ApiError(400, "TOO_MANY_VIDEO_REFERENCES", "单次视频任务最多接收 30 张参考图。");
   for (const singletonRole of ["first_frame", "last_frame"] as const) {
     if (images.filter((image) => image.role === singletonRole).length > 1) {
       throw new ApiError(400, "DUPLICATE_VIDEO_REFERENCE_ROLE", `${singletonRole} 参考图最多只能提供一张。`);
@@ -621,10 +630,28 @@ function collectReferenceImages(input: VideoGenerationInput): Array<{ url: strin
   return images;
 }
 
+function validateReferenceImageMode(images: readonly { role: VideoReferenceImageRole }[]): void {
+  const generalCount = images.filter((image) => image.role === "reference_image").length;
+  const firstCount = images.filter((image) => image.role === "first_frame").length;
+  const lastCount = images.filter((image) => image.role === "last_frame").length;
+  if (generalCount > 0 && (firstCount > 0 || lastCount > 0)) {
+    throw new ApiError(400, "INVALID_VIDEO_REFERENCE_MODE", "内容参考图不能与首帧或尾帧模式混用。");
+  }
+  if (lastCount > 0 && firstCount === 0) {
+    throw new ApiError(400, "INVALID_VIDEO_REFERENCE_MODE", "设置尾帧时必须同时提供首帧。");
+  }
+  if (firstCount > 0 && images[0]?.role !== "first_frame") {
+    throw new ApiError(400, "INVALID_VIDEO_REFERENCE_MODE", "首帧必须是第一张输入图片。");
+  }
+  if (lastCount > 0 && (images.length !== 2 || images[1]?.role !== "last_frame")) {
+    throw new ApiError(400, "INVALID_VIDEO_REFERENCE_MODE", "首尾帧模式必须依次提供一张首帧和一张尾帧图片。");
+  }
+}
+
 function validateReferenceImageUrlSyntax(value: string): void {
   if (!value) throw new ApiError(400, "INVALID_VIDEO_REFERENCE_URL", "参考图地址不能为空。");
   if (/^asset:\/\/[A-Za-z0-9._~-]+$/i.test(value)) return;
-  const data = value.match(/^data:(image\/(?:jpeg|png|webp|gif|heic));base64,([A-Za-z0-9+/=]+)$/i);
+  const data = value.match(/^data:(image\/(?:jpeg|png|webp|bmp|tiff|gif|heic|heif));base64,([A-Za-z0-9+/=]+)$/);
   if (data) {
     if (data[2].length > Math.ceil(MAX_REFERENCE_IMAGE_BYTES * 4 / 3) + 4) {
       throw new ApiError(400, "VIDEO_REFERENCE_TOO_LARGE", "单张参考图不能超过 30 MB。");

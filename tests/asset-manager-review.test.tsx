@@ -369,6 +369,116 @@ describe("AssetManager 审查项回归", () => {
     ).toBeVisible();
   });
 
+  test("视频参考图只列出已就绪项目图片，并按重排后的顺序与角色提交", async () => {
+    const model = makeModel({
+      id: "seedance-2-5",
+      name: "豆包 Seedance 2.5",
+      modelId: "doubao-seedance-2-5-260628",
+      parameters: {
+        presetKey: "seedance-2.5",
+        capabilities: ["video-generation", "image-to-video"],
+      },
+    });
+    const assets = [
+      makeAsset({ id: "ready-street", name: "就绪街景", sourceUrl: "https://example.test/street.png" }),
+      makeAsset({
+        id: "ready-character",
+        name: "就绪人物",
+        sourceUrl: null,
+        hasContent: true,
+        contentUrl: "/api/projects/project-1/assets/ready-character/content",
+      }),
+      makeAsset({ id: "pending-image", name: "处理中图片", status: "processing" }),
+      makeAsset({ id: "ready-video", name: "就绪视频", mediaType: "video", sourceUrl: "https://example.test/video.mp4" }),
+      makeAsset({ id: "empty-image", name: "空图片", sourceUrl: null, thumbnailUrl: null, hasContent: false }),
+    ];
+    let createBody: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([model]);
+        if (url.endsWith("/characters")) return jsonResponse([]);
+        if (url.endsWith("/assets/generate") && init?.method === "POST") {
+          createBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          const options = (createBody.options ?? {}) as AssetGenerationJob["options"];
+          const job = makeGenerationJob({
+            id: "gen-video",
+            modelId: model.id,
+            modelName: model.name,
+            mediaType: "video",
+            name: String(createBody.name),
+            prompt: String(createBody.prompt),
+            aspectRatio: String(createBody.aspectRatio),
+            options,
+          });
+          return new Response(JSON.stringify({ data: { generation: job } }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/assets/generate/gen-video") && init?.method === "POST") {
+          return jsonResponse({ generation: makeGenerationJob({ id: "gen-video", mediaType: "video" }) });
+        }
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
+        if (url.endsWith("/assets")) return jsonResponse(assets);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+    await user.click(await screen.findByRole("button", { name: "AI 创建资产" }));
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "参考方式" }), "first_last_frame");
+    let assetSelect = screen.getByRole("combobox", { name: "添加项目图片" }) as HTMLSelectElement;
+    expect(Array.from(assetSelect.options, (option) => option.value)).toEqual([
+      "",
+      "ready-street",
+      "ready-character",
+    ]);
+    expect(within(assetSelect).queryByRole("option", { name: /处理中图片/ })).toBeNull();
+    expect(within(assetSelect).queryByRole("option", { name: /就绪视频/ })).toBeNull();
+    expect(within(assetSelect).queryByRole("option", { name: /空图片/ })).toBeNull();
+
+    await user.selectOptions(assetSelect, "ready-street");
+    assetSelect = screen.getByRole("combobox", { name: "添加项目图片" }) as HTMLSelectElement;
+    await user.selectOptions(assetSelect, "ready-character");
+    expect(screen.getByText("已选 2 / 2 张")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "上移尾帧" }));
+    let selectedList = screen.getByLabelText("已选参考图列表");
+    expect(within(selectedList).getAllByText(/就绪(?:街景|人物)/).map((item) => item.textContent)).toEqual([
+      "就绪人物",
+      "就绪街景",
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "移除尾帧" }));
+    expect(within(screen.getByLabelText("已选参考图列表")).queryByText("就绪街景")).toBeNull();
+    assetSelect = screen.getByRole("combobox", { name: "添加项目图片" }) as HTMLSelectElement;
+    await user.selectOptions(assetSelect, "ready-street");
+    selectedList = screen.getByLabelText("已选参考图列表");
+    expect(within(selectedList).getAllByText(/就绪(?:街景|人物)/).map((item) => item.textContent)).toEqual([
+      "就绪人物",
+      "就绪街景",
+    ]);
+
+    await user.type(screen.getByRole("textbox", { name: "资产名称 *" }), "首尾帧短片");
+    await user.type(screen.getByRole("textbox", { name: "生成提示词 *" }), "从人物特写过渡到雨夜街景");
+    await user.click(screen.getByRole("button", { name: "创建生成任务" }));
+
+    await waitFor(() => expect(createBody).toBeDefined());
+    expect(createBody).toMatchObject({
+      mediaType: "video",
+      options: {
+        referenceImages: [
+          { assetId: "ready-character", role: "first_frame" },
+          { assetId: "ready-street", role: "last_frame" },
+        ],
+      },
+    });
+  });
+
   test("AI 创建后立即关闭弹窗并显示持久任务卡，失败时展示服务端原因", async () => {
     const model = makeModel({ id: "generation", name: "正式生图模型" });
     let resolveRunner: ((response: Response) => void) | undefined;

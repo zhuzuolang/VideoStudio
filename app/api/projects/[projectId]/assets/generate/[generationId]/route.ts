@@ -21,6 +21,7 @@ import {
   getVideoGenerationTask,
   openGeneratedVideoStream,
 } from "@/lib/server/video-generation";
+import { parseVideoReferenceAssets, resolveVideoReferenceAssets } from "@/lib/server/video-reference-assets";
 
 export const dynamic = "force-dynamic";
 const LEASE_MS = 300_000;
@@ -175,17 +176,24 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     let resolvedProviderTaskId = generation.providerTaskId ?? null;
 
     if (generation.mediaType === "video") {
-      const videoInput = {
-        prompt: generation.prompt,
-        resolution: generation.options.resolution,
-        aspectRatio: generation.aspectRatio || undefined,
-        duration: generation.options.duration,
-        generateAudio: generation.options.generateAudio,
-        referenceImageUrl: generation.options.referenceImageUrl,
-        referenceImageRole: generation.options.referenceImageRole,
-        signal: leaseAbortController.signal,
-      };
       if (!resolvedProviderTaskId) {
+        const referenceImages = await resolveVideoReferenceAssets(
+          db,
+          bucket,
+          projectId,
+          parseVideoReferenceAssets(generation.options.referenceImages),
+        );
+        const videoInput = {
+          prompt: generation.prompt,
+          resolution: generation.options.resolution,
+          aspectRatio: generation.aspectRatio || undefined,
+          duration: generation.options.duration,
+          generateAudio: generation.options.generateAudio,
+          referenceImages,
+          referenceImageUrl: generation.options.referenceImageUrl,
+          referenceImageRole: generation.options.referenceImageRole,
+          signal: leaseAbortController.signal,
+        };
         // Validate the model-specific profile before marking the call as potentially billable.
         buildVideoGenerationRequest(model, videoInput);
         providerInvoked = true;

@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertCircle,
+  ArrowDown,
+  ArrowUp,
   Box,
   CheckCircle2,
   ExternalLink,
@@ -40,6 +42,7 @@ import {
   type AssetRelationInput,
   type ProjectAsset,
   type ProjectAssetInput,
+  type VideoReferenceImageRole,
 } from "@/lib/platform-types";
 import {
   ASSET_RELATION_META,
@@ -48,6 +51,7 @@ import {
   relationTypeLabel,
   type AssetRelationType,
 } from "@/lib/asset-relations";
+import { findSeedanceModelPreset } from "@/lib/seedance-model-presets";
 import {
   apiRequest,
   PlatformApiError,
@@ -68,6 +72,7 @@ type CharacterOption = { id: string; name: string };
 type SourceMode = "file" | "url";
 type DialogMode = "asset" | "generate" | null;
 type RelationFilter = "all" | "linked" | "unlinked" | AssetRelationType;
+type VideoReferenceMode = "reference_image" | "first_frame" | "first_last_frame";
 type AssetForm = {
   name: string;
   mediaType: AssetMediaType;
@@ -88,8 +93,8 @@ type GenerateForm = {
   resolution: string;
   duration: number;
   generateAudio: boolean;
-  referenceImageUrl: string;
-  referenceImageRole: "first_frame" | "last_frame" | "reference_image";
+  referenceMode: VideoReferenceMode;
+  referenceImageAssetIds: string[];
   relations: AssetRelationInput[];
 };
 
@@ -136,8 +141,8 @@ const EMPTY_GENERATE: GenerateForm = {
   resolution: "720p",
   duration: 5,
   generateAudio: false,
-  referenceImageUrl: "",
-  referenceImageRole: "first_frame",
+  referenceMode: "reference_image",
+  referenceImageAssetIds: [],
   relations: [],
 };
 
@@ -207,12 +212,24 @@ type ModelVideoConfig = {
   supportsAutoDuration: boolean;
   supportsGenerateAudio: boolean;
   defaultGenerateAudio: boolean;
-  referenceImageRoles: Array<GenerateForm["referenceImageRole"]>;
+  maxReferenceImages: number;
+  referenceImageRoles: VideoReferenceImageRole[];
 };
 
 function modelVideoConfig(model: AiModel | undefined): ModelVideoConfig {
-  const value = model?.parameters.video;
-  const video = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const configuredValue = model?.parameters.video;
+  const configuredVideo = configuredValue && typeof configuredValue === "object" && !Array.isArray(configuredValue)
+    ? configuredValue as Record<string, unknown>
+    : {};
+  const configuredProfile = typeof configuredVideo.requestProfile === "string"
+    ? configuredVideo.requestProfile
+    : typeof model?.parameters.presetKey === "string"
+      ? model.parameters.presetKey
+      : model?.modelId ?? "";
+  const officialPreset = findSeedanceModelPreset(configuredProfile);
+  const video = officialPreset
+    ? officialPreset.parameters.video as unknown as Record<string, unknown>
+    : configuredVideo;
   const strings = (key: string, fallback: string[]) => Array.isArray(video[key])
     ? (video[key] as unknown[]).filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : fallback;
@@ -222,7 +239,7 @@ function modelVideoConfig(model: AiModel | undefined): ModelVideoConfig {
   const resolutions = strings("resolutions", ["480p", "720p", "1080p"]);
   const aspectRatios = strings("aspectRatios", ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]);
   const referenceImageRoles = strings("referenceImageRoles", ["first_frame"])
-    .filter((role): role is GenerateForm["referenceImageRole"] => ["first_frame", "last_frame", "reference_image"].includes(role));
+    .filter((role): role is VideoReferenceImageRole => ["first_frame", "last_frame", "reference_image"].includes(role));
   return {
     resolutions,
     defaultResolution: typeof video.defaultResolution === "string" ? video.defaultResolution : resolutions[0] || "720p",
@@ -234,8 +251,27 @@ function modelVideoConfig(model: AiModel | undefined): ModelVideoConfig {
     supportsAutoDuration: video.supportsAutoDuration === true,
     supportsGenerateAudio: video.supportsGenerateAudio === true,
     defaultGenerateAudio: video.defaultGenerateAudio === true,
+    maxReferenceImages: Math.max(1, Math.min(30, Math.trunc(number("maxReferenceImages", 9)))),
     referenceImageRoles,
   };
+}
+
+function defaultReferenceMode(config: ModelVideoConfig): VideoReferenceMode {
+  if (config.referenceImageRoles.includes("reference_image")) return "reference_image";
+  if (config.referenceImageRoles.includes("first_frame")) return "first_frame";
+  return "reference_image";
+}
+
+function referenceModeLimit(mode: VideoReferenceMode, config: ModelVideoConfig): number {
+  if (mode === "first_frame") return 1;
+  if (mode === "first_last_frame") return 2;
+  return config.maxReferenceImages;
+}
+
+function referenceRole(mode: VideoReferenceMode, index: number): VideoReferenceImageRole {
+  if (mode === "first_frame") return "first_frame";
+  if (mode === "first_last_frame") return index === 0 ? "first_frame" : "last_frame";
+  return "reference_image";
 }
 
 function isDefinitiveGenerationSubmissionFailure(reason: unknown): boolean {
@@ -261,7 +297,20 @@ function isDefinitiveGenerationSubmissionFailure(reason: unknown): boolean {
     "INVALID_VIDEO_RESOLUTION",
     "INVALID_VIDEO_RATIO",
     "INVALID_VIDEO_AUDIO_OPTION",
+    "VIDEO_REQUEST_PROFILE_MISSING",
     "INVALID_VIDEO_REFERENCE_ROLE",
+    "INVALID_VIDEO_REFERENCE_ASSETS",
+    "INVALID_VIDEO_REFERENCE_MODE",
+    "DUPLICATE_VIDEO_REFERENCE_ASSET",
+    "DUPLICATE_VIDEO_REFERENCE_ROLE",
+    "VIDEO_REFERENCE_ASSET_TOO_LARGE",
+    "VIDEO_REFERENCE_ASSETS_TOO_LARGE",
+    "VIDEO_REFERENCE_ASSET_NOT_FOUND",
+    "VIDEO_REFERENCE_ASSET_NOT_IMAGE",
+    "VIDEO_REFERENCE_ASSET_NOT_READY",
+    "VIDEO_REFERENCE_ASSET_CONTENT_MISSING",
+    "VIDEO_REFERENCE_ASSET_TYPE_UNSUPPORTED",
+    "TOO_MANY_VIDEO_REFERENCES",
     "GENERATION_REQUEST_ALREADY_USED",
   ]).has(reason.code);
 }
@@ -851,6 +900,30 @@ export default function AssetManager({
     [eligibleModels, generateForm.modelId],
   );
   const selectedVideoConfig = useMemo(() => modelVideoConfig(selectedGenerationModel), [selectedGenerationModel]);
+  const referenceModeOptions = useMemo(() => {
+    const options: Array<{ value: VideoReferenceMode; label: string }> = [];
+    if (selectedVideoConfig.referenceImageRoles.includes("reference_image")) {
+      options.push({ value: "reference_image", label: "内容参考（图片1、图片2…）" });
+    }
+    if (selectedVideoConfig.referenceImageRoles.includes("first_frame")) {
+      options.push({ value: "first_frame", label: "首帧" });
+    }
+    if (selectedVideoConfig.referenceImageRoles.includes("first_frame")
+      && selectedVideoConfig.referenceImageRoles.includes("last_frame")) {
+      options.push({ value: "first_last_frame", label: "首帧 + 尾帧" });
+    }
+    return options;
+  }, [selectedVideoConfig]);
+  const referenceImageLimit = referenceModeLimit(generateForm.referenceMode, selectedVideoConfig);
+  const selectableReferenceAssets = useMemo(() => assets.filter((asset) =>
+    asset.mediaType === "image"
+    && asset.status === "ready"
+    && Boolean(asset.hasContent || asset.sourceUrl),
+  ), [assets]);
+  const availableReferenceAssets = useMemo(() => {
+    const selectedIds = new Set(generateForm.referenceImageAssetIds);
+    return selectableReferenceAssets.filter((asset) => !selectedIds.has(asset.id));
+  }, [generateForm.referenceImageAssetIds, selectableReferenceAssets]);
   const visibleAssets = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return assets.filter(
@@ -987,6 +1060,7 @@ export default function AssetManager({
       resolution: config.defaultResolution,
       duration: config.defaultDuration,
       generateAudio: config.defaultGenerateAudio,
+      referenceMode: defaultReferenceMode(config),
     });
     setFormError("");
     setDirty(false);
@@ -1011,6 +1085,44 @@ export default function AssetManager({
     setDirty(true);
     setFormError("");
   }
+  function selectReferenceMode(mode: VideoReferenceMode) {
+    setGenerateForm((current) => ({
+      ...current,
+      referenceMode: mode,
+      referenceImageAssetIds: [],
+    }));
+    setDirty(true);
+    setFormError("");
+  }
+  function addReferenceAsset(assetId: string) {
+    if (!assetId) return;
+    setGenerateForm((current) => {
+      const limit = referenceModeLimit(current.referenceMode, selectedVideoConfig);
+      if (current.referenceImageAssetIds.includes(assetId) || current.referenceImageAssetIds.length >= limit) return current;
+      return { ...current, referenceImageAssetIds: [...current.referenceImageAssetIds, assetId] };
+    });
+    setDirty(true);
+    setFormError("");
+  }
+  function moveReferenceAsset(index: number, direction: -1 | 1) {
+    setGenerateForm((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.referenceImageAssetIds.length) return current;
+      const referenceImageAssetIds = [...current.referenceImageAssetIds];
+      [referenceImageAssetIds[index], referenceImageAssetIds[target]] = [referenceImageAssetIds[target], referenceImageAssetIds[index]];
+      return { ...current, referenceImageAssetIds };
+    });
+    setDirty(true);
+    setFormError("");
+  }
+  function removeReferenceAsset(assetId: string) {
+    setGenerateForm((current) => ({
+      ...current,
+      referenceImageAssetIds: current.referenceImageAssetIds.filter((id) => id !== assetId),
+    }));
+    setDirty(true);
+    setFormError("");
+  }
   function selectGenerateModel(modelId: string) {
     const model = eligibleModels.find((item) => item.id === modelId);
     const video = model ? isVideoModel(model) : false;
@@ -1024,8 +1136,8 @@ export default function AssetManager({
       resolution: config.defaultResolution,
       duration: config.defaultDuration,
       generateAudio: config.defaultGenerateAudio,
-      referenceImageUrl: "",
-      referenceImageRole: config.referenceImageRoles[0] || "first_frame",
+      referenceMode: defaultReferenceMode(config),
+      referenceImageAssetIds: [],
     }));
     setDirty(true);
     setFormError("");
@@ -1131,15 +1243,30 @@ export default function AssetManager({
     if (!generateForm.modelId) return setFormError("请选择已配置的图片或视频模型。");
     if (!generateForm.name.trim() || !generateForm.prompt.trim())
       return setFormError("请填写资产名称与提示词。");
-    if (generateForm.mediaType === "video" && generateForm.referenceImageUrl.trim() && !isHttpUrl(generateForm.referenceImageUrl.trim())) {
-      return setFormError("参考图必须是可供模型访问的 HTTPS 地址。");
+    if (generateForm.mediaType === "video"
+      && generateForm.referenceImageAssetIds.some((assetId) => !selectableReferenceAssets.some((asset) => asset.id === assetId))) {
+      return setFormError("部分参考图已不可用，请重新选择。");
     }
+    if (generateForm.mediaType === "video" && generateForm.referenceImageAssetIds.length > referenceImageLimit) {
+      return setFormError(`当前参考方式最多选择 ${referenceImageLimit} 张图片。`);
+    }
+    if (generateForm.mediaType === "video"
+      && generateForm.referenceMode === "first_last_frame"
+      && generateForm.referenceImageAssetIds.length === 1) {
+      return setFormError("首尾帧模式还需要选择一张尾帧图片。");
+    }
+    const referenceImages = generateForm.mediaType === "video"
+      ? generateForm.referenceImageAssetIds.map((assetId, index) => ({
+          assetId,
+          role: referenceRole(generateForm.referenceMode, index),
+        }))
+      : [];
     const snapshot = {
       ...generateForm,
       name: generateForm.name.trim(),
       prompt: generateForm.prompt.trim(),
       size: generateForm.size.trim(),
-      referenceImageUrl: generateForm.referenceImageUrl.trim(),
+      referenceImages,
     };
     const clientRequestId = crypto.randomUUID();
     const submissionProjectId = projectId;
@@ -1160,8 +1287,7 @@ export default function AssetManager({
         resolution: snapshot.resolution,
         duration: snapshot.duration,
         generateAudio: snapshot.generateAudio,
-        referenceImageUrl: snapshot.referenceImageUrl || undefined,
-        referenceImageRole: snapshot.referenceImageUrl ? snapshot.referenceImageRole : undefined,
+        referenceImages: snapshot.referenceImages.length > 0 ? snapshot.referenceImages : undefined,
       } : {},
       relations: snapshot.relations,
       status: "submitting",
@@ -1204,8 +1330,7 @@ export default function AssetManager({
             resolution: snapshot.resolution,
             duration: snapshot.duration,
             generateAudio: snapshot.generateAudio,
-            referenceImageUrl: snapshot.referenceImageUrl || undefined,
-            referenceImageRole: snapshot.referenceImageUrl ? snapshot.referenceImageRole : undefined,
+            referenceImages: snapshot.referenceImages.length > 0 ? snapshot.referenceImages : undefined,
           } : undefined,
           relations: snapshot.relations,
         }),
@@ -2060,7 +2185,7 @@ export default function AssetManager({
           }
         >
           <div
-            className={styles.dialog}
+            className={joinClassNames(styles.dialog, styles.generateDialog)}
             role="dialog"
             aria-modal="true"
             aria-labelledby="generate-asset-title"
@@ -2194,29 +2319,115 @@ export default function AssetManager({
                         {selectedVideoConfig.supportsAutoDuration ? "，或由模型智能选择" : ""}
                       </span>
                     </div>
-                    {selectedVideoConfig.referenceImageRoles.length > 0 && <>
-                      <div className={styles.fieldFull}>
-                        <label htmlFor="generate-reference-image">参考图地址（可选）</label>
-                        <input
-                          id="generate-reference-image"
-                          type="url"
-                          placeholder="https://…/reference.jpg"
-                          value={generateForm.referenceImageUrl}
-                          onChange={(event) => updateGenerate("referenceImageUrl", event.target.value)}
-                        />
-                        <span className={styles.fieldHint}>需为火山方舟可访问的 HTTPS 图片地址。</span>
-                      </div>
-                      {generateForm.referenceImageUrl && (
-                        <div className={styles.field}>
-                          <label htmlFor="generate-reference-role">参考方式</label>
-                          <select id="generate-reference-role" value={generateForm.referenceImageRole} onChange={(event) => updateGenerate("referenceImageRole", event.target.value as GenerateForm["referenceImageRole"])}>
-                            {selectedVideoConfig.referenceImageRoles.map((role) => (
-                              <option key={role} value={role}>{role === "first_frame" ? "首帧" : role === "last_frame" ? "尾帧" : "内容参考"}</option>
-                            ))}
-                          </select>
+                    {selectedVideoConfig.referenceImageRoles.length > 0 && (
+                      <fieldset className={joinClassNames(styles.fieldset, styles.referenceAssetEditor)}>
+                        <legend>参考图（可选）</legend>
+                        <div className={styles.referenceAssetToolbar}>
+                          <label className={styles.field}>
+                            <span>参考方式</span>
+                            <select
+                              aria-label="参考方式"
+                              value={generateForm.referenceMode}
+                              onChange={(event) => selectReferenceMode(event.target.value as VideoReferenceMode)}
+                            >
+                              {referenceModeOptions.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className={styles.field}>
+                            <span>添加项目图片</span>
+                            <select
+                              aria-label="添加项目图片"
+                              value=""
+                              disabled={generateForm.referenceImageAssetIds.length >= referenceImageLimit || availableReferenceAssets.length === 0}
+                              onChange={(event) => addReferenceAsset(event.target.value)}
+                            >
+                              <option value="">
+                                {generateForm.referenceImageAssetIds.length >= referenceImageLimit
+                                  ? `已达到 ${referenceImageLimit} 张上限`
+                                  : availableReferenceAssets.length === 0
+                                    ? "没有可添加的项目图片"
+                                    : "选择一张项目图片…"}
+                              </option>
+                              {availableReferenceAssets.map((asset) => (
+                                <option key={asset.id} value={asset.id}>{asset.name} · {CATEGORY_META[asset.category].label}</option>
+                              ))}
+                            </select>
+                          </label>
                         </div>
-                      )}
-                    </>}
+                        <div className={styles.referenceAssetSummary}>
+                          <span>
+                            已选 {generateForm.referenceImageAssetIds.length} / {referenceImageLimit} 张
+                          </span>
+                          <small>
+                            {generateForm.referenceMode === "reference_image"
+                              ? "列表顺序对应提示词中的图片1、图片2……"
+                              : generateForm.referenceMode === "first_frame"
+                                ? "选择一张项目图片作为视频首帧。"
+                                : "列表第1张是首帧，第2张是尾帧。"}
+                          </small>
+                        </div>
+                        <div
+                          className={styles.referenceAssetList}
+                          role="list"
+                          aria-label="已选参考图列表"
+                          aria-live="polite"
+                        >
+                          {generateForm.referenceImageAssetIds.map((assetId, index) => {
+                            const asset = selectableReferenceAssets.find((item) => item.id === assetId);
+                            const imageSource = asset ? assetPreviewSource(asset) : null;
+                            const itemLabel = generateForm.referenceMode === "reference_image"
+                              ? `图片 ${index + 1}`
+                              : generateForm.referenceMode === "first_frame" || index === 0
+                                ? "首帧"
+                                : "尾帧";
+                            return (
+                              <div key={assetId} className={styles.referenceAssetItem} role="listitem">
+                                <span className={styles.referenceAssetIndex}>{itemLabel}</span>
+                                <span className={styles.referenceAssetThumbnail}>
+                                  <ImageIcon size={18} aria-hidden="true" />
+                                  {imageSource && <img src={imageSource} alt="" onError={(event) => { event.currentTarget.style.display = "none"; }} />}
+                                </span>
+                                <span className={styles.referenceAssetMeta}>
+                                  <b>{asset?.name ?? "图片已不可用"}</b>
+                                  <small>{asset ? `${CATEGORY_META[asset.category].label}${formatAssetSize(asset.sizeBytes) ? ` · ${formatAssetSize(asset.sizeBytes)}` : ""}` : "请移除后重新选择"}</small>
+                                </span>
+                                <span className={styles.referenceAssetActions}>
+                                  <button
+                                    type="button"
+                                    className={styles.iconButton}
+                                    aria-label={`上移${itemLabel}`}
+                                    disabled={index === 0}
+                                    onClick={() => moveReferenceAsset(index, -1)}
+                                  ><ArrowUp size={13} /></button>
+                                  <button
+                                    type="button"
+                                    className={styles.iconButton}
+                                    aria-label={`下移${itemLabel}`}
+                                    disabled={index === generateForm.referenceImageAssetIds.length - 1}
+                                    onClick={() => moveReferenceAsset(index, 1)}
+                                  ><ArrowDown size={13} /></button>
+                                  <button
+                                    type="button"
+                                    className={styles.textButton}
+                                    aria-label={`移除${itemLabel}`}
+                                    onClick={() => removeReferenceAsset(assetId)}
+                                  ><X size={12} /> 移除</button>
+                                </span>
+                              </div>
+                            );
+                          })}
+                          {generateForm.referenceImageAssetIds.length === 0 && (
+                            <div className={styles.referenceAssetEmpty}>
+                              <ImageIcon size={17} />
+                              <span>{selectableReferenceAssets.length > 0 ? "从项目图片中添加参考图" : "项目中还没有已就绪的图片资产"}</span>
+                            </div>
+                          )}
+                        </div>
+                        <span className={styles.fieldHint}>项目内图片会由服务端安全读取；本地文件单张不超过 8 MB、合计不超过 24 MB。</span>
+                      </fieldset>
+                    )}
                     {selectedVideoConfig.supportsGenerateAudio && (
                       <div className={styles.fieldFull}>
                         <label className={styles.checkboxLine}>

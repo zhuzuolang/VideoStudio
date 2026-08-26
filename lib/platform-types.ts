@@ -270,12 +270,22 @@ export type AssetGenerationPhase =
   | "completed"
   | "failed";
 
+export type VideoReferenceImageRole = "first_frame" | "last_frame" | "reference_image";
+
+export type VideoReferenceAssetInput = {
+  assetId: string;
+  role: VideoReferenceImageRole;
+};
+
 export type VideoGenerationOptions = {
   resolution?: string;
   duration?: number;
   generateAudio?: boolean;
+  referenceImages?: VideoReferenceAssetInput[];
+  /** @deprecated Kept so generation jobs created before project-asset references still run. */
   referenceImageUrl?: string;
-  referenceImageRole?: "first_frame" | "last_frame" | "reference_image";
+  /** @deprecated Kept so generation jobs created before project-asset references still run. */
+  referenceImageRole?: VideoReferenceImageRole;
 };
 
 export type AssetGenerationJob = {

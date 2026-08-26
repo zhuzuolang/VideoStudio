@@ -3,7 +3,12 @@ import { findAssetGenerationByClientRequest, listAssetGenerations, serializeAsse
 import { parseAssetRelations, safeRemoteUrl, validateAssetCategory } from "@/lib/server/assets";
 import { apiContext, type RouteContext } from "@/lib/server/context";
 import { modelSupportsImageGeneration } from "@/lib/server/image-generation";
-import { modelSupportsVideoGeneration } from "@/lib/server/video-generation";
+import { modelSupportsVideoGeneration, seedanceRequestProfile } from "@/lib/server/video-generation";
+import {
+  parseVideoReferenceAssets,
+  validateVideoReferenceAssets,
+  validateVideoReferenceProfile,
+} from "@/lib/server/video-reference-assets";
 import { requireOwnedModel, requireOwnedProject, validateAssetRelationTargets } from "@/lib/server/store";
 import type { VideoGenerationOptions } from "@/lib/platform-types";
 
@@ -44,12 +49,26 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     if (rawGenerateAudio !== undefined && typeof rawGenerateAudio !== "boolean") {
       throw new ApiError(400, "INVALID_VIDEO_AUDIO_OPTION", "有声视频选项必须是布尔值。");
     }
+    const referenceImages = mediaType === "video" ? parseVideoReferenceAssets(optionInput.referenceImages) : [];
+    const legacyReferenceImageUrl = mediaType === "video"
+      ? safeRemoteUrl(optionalString(optionInput, "referenceImageUrl", { max: 2_000, nullable: true }), "referenceImageUrl") || undefined
+      : undefined;
+    const legacyReferenceImageRole = mediaType === "video" && optionInput.referenceImageRole !== undefined
+      ? String(optionInput.referenceImageRole) as VideoGenerationOptions["referenceImageRole"]
+      : undefined;
+    if (referenceImages.length > 0 && legacyReferenceImageUrl) {
+      throw new ApiError(400, "INVALID_VIDEO_REFERENCE_ASSETS", "项目参考图不能与旧版参考图地址同时使用。");
+    }
+    if (legacyReferenceImageRole && !legacyReferenceImageUrl) {
+      throw new ApiError(400, "INVALID_VIDEO_REFERENCE_ROLE", "设置参考图方式前请先提供参考图。");
+    }
     const options: VideoGenerationOptions = mediaType === "video" ? {
       resolution: optionalString(optionInput, "resolution", { max: 20 }) || undefined,
       duration: optionInput.duration === undefined ? undefined : Number(optionInput.duration),
       generateAudio: rawGenerateAudio,
-      referenceImageUrl: safeRemoteUrl(optionalString(optionInput, "referenceImageUrl", { max: 2_000, nullable: true }), "referenceImageUrl") || undefined,
-      referenceImageRole: optionInput.referenceImageRole === undefined ? undefined : String(optionInput.referenceImageRole) as VideoGenerationOptions["referenceImageRole"],
+      referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+      referenceImageUrl: legacyReferenceImageUrl,
+      referenceImageRole: legacyReferenceImageRole,
     } : {};
     if (options.duration !== undefined && (!Number.isInteger(options.duration)
       || (options.duration !== -1 && (options.duration < 1 || options.duration > 30)))) {
@@ -77,6 +96,9 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     if (!model.api_key_ciphertext || !model.api_key_iv) throw new ApiError(400, "MODEL_API_KEY_MISSING", "所选模型尚未配置 API Key。");
     if (mediaType === "video") {
       if (!modelSupportsVideoGeneration(model)) throw new ApiError(400, "MODEL_VIDEO_UNSUPPORTED", "所选模型未声明视频生成能力。");
+      const { profile } = seedanceRequestProfile(model);
+      validateVideoReferenceProfile(referenceImages, profile);
+      await validateVideoReferenceAssets(db, projectId, referenceImages);
     } else if (!modelSupportsImageGeneration(model)) {
       throw new ApiError(400, "MODEL_IMAGE_UNSUPPORTED", "所选模型未声明图像生成能力。");
     }

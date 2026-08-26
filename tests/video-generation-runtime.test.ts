@@ -82,6 +82,7 @@ describe("Seedance 官方价格预设", () => {
           defaultDuration: expect.any(Number),
           supportsGenerateAudio: expect.any(Boolean),
           defaultGenerateAudio: expect.any(Boolean),
+          maxReferenceImages: expect.any(Number),
           referenceImageRoles: ["first_frame", "last_frame", "reference_image"],
         },
       });
@@ -90,10 +91,10 @@ describe("Seedance 官方价格预设", () => {
 
   test("profile 明确表达各 SKU 的分辨率、时长和音频差异", () => {
     const [v25, v20, fast, mini] = SEEDANCE_MODEL_PRESETS.map((preset) => preset.parameters.video);
-    expect(v25).toMatchObject({ resolutions: ["480p", "720p", "1080p"], maxDuration: 30, supportsAutoDuration: true, supportsGenerateAudio: true });
-    expect(v20).toMatchObject({ resolutions: ["480p", "720p", "1080p"], maxDuration: 15, supportsAutoDuration: true });
-    expect(fast).toMatchObject({ resolutions: ["480p", "720p", "1080p"], maxDuration: 15, supportsAutoDuration: true, supportsGenerateAudio: true });
-    expect(mini).toMatchObject({ resolutions: ["480p", "720p", "1080p"], maxDuration: 15, supportsAutoDuration: true, supportsGenerateAudio: true });
+    expect(v25).toMatchObject({ resolutions: ["480p", "720p", "1080p"], maxDuration: 30, supportsAutoDuration: true, supportsGenerateAudio: true, maxReferenceImages: 30 });
+    expect(v20).toMatchObject({ resolutions: ["480p", "720p", "1080p", "4k"], maxDuration: 15, supportsAutoDuration: true, maxReferenceImages: 9 });
+    expect(fast).toMatchObject({ resolutions: ["480p", "720p"], maxDuration: 15, supportsAutoDuration: true, supportsGenerateAudio: true, maxReferenceImages: 9 });
+    expect(mini).toMatchObject({ resolutions: ["480p", "720p"], maxDuration: 15, supportsAutoDuration: true, supportsGenerateAudio: true, maxReferenceImages: 9 });
   });
 });
 
@@ -161,17 +162,22 @@ describe("Seedance 请求 profile", () => {
     });
   });
 
-  test("2.5 接受 30 秒，且当前 Fast 支持 1080p", () => {
+  test("2.5 接受 30 秒与 1080p、2.0 接受 4k，Fast 拒绝官方范围外的 1080p", () => {
     expect(buildVideoGenerationRequest(configuredModel(0), {
       prompt: "长镜头",
       duration: 30,
       resolution: "1080p",
     })).toMatchObject({ duration: 30, resolution: "1080p" });
 
-    expect(buildVideoGenerationRequest(configuredModel(2), {
+    expect(buildVideoGenerationRequest(configuredModel(1), {
+      prompt: "4K 城市航拍",
+      resolution: "4k",
+    })).toMatchObject({ resolution: "4k" });
+
+    expect(() => buildVideoGenerationRequest(configuredModel(2), {
       prompt: "快速镜头",
       resolution: "1080p",
-    })).toMatchObject({ resolution: "1080p" });
+    })).toThrowError(expect.objectContaining({ code: "INVALID_VIDEO_RESOLUTION" }));
   });
 
   test("2.0 与 Mini 支持 -1 智能时长和有声输出", () => {

@@ -27,6 +27,7 @@ export type SeedanceVideoPreset = {
   supportsAutoDuration: boolean;
   supportsGenerateAudio: boolean;
   defaultGenerateAudio: boolean;
+  maxReferenceImages: number;
   referenceImageRoles: readonly string[];
 };
 
@@ -93,6 +94,7 @@ export const SEEDANCE_MODEL_PRESETS = [
         supportsAutoDuration: true,
         supportsGenerateAudio: true,
         defaultGenerateAudio: true,
+        maxReferenceImages: 30,
         referenceImageRoles: COMMON_REFERENCE_IMAGE_ROLES,
       },
     },
@@ -123,7 +125,7 @@ export const SEEDANCE_MODEL_PRESETS = [
       },
       video: {
         requestProfile: "seedance-2.0",
-        resolutions: ["480p", "720p", "1080p"],
+        resolutions: ["480p", "720p", "1080p", "4k"],
         defaultResolution: "720p",
         aspectRatios: COMMON_ASPECT_RATIOS,
         defaultAspectRatio: "adaptive",
@@ -133,11 +135,12 @@ export const SEEDANCE_MODEL_PRESETS = [
         supportsAutoDuration: true,
         supportsGenerateAudio: true,
         defaultGenerateAudio: true,
+        maxReferenceImages: 9,
         referenceImageRoles: COMMON_REFERENCE_IMAGE_ROLES,
       },
     },
     priceLabel: "¥46 起 / 百万 tokens（图生/文生）· 视频输入 ¥28 起",
-    resolutionLabel: "480p / 720p / 1080p",
+    resolutionLabel: "480p / 720p / 1080p / 4K",
     durationLabel: "4–15 秒 / 智能",
   },
   {
@@ -163,7 +166,7 @@ export const SEEDANCE_MODEL_PRESETS = [
       },
       video: {
         requestProfile: "seedance-2.0-fast",
-        resolutions: ["480p", "720p", "1080p"],
+        resolutions: ["480p", "720p"],
         defaultResolution: "720p",
         aspectRatios: COMMON_ASPECT_RATIOS,
         defaultAspectRatio: "adaptive",
@@ -173,11 +176,12 @@ export const SEEDANCE_MODEL_PRESETS = [
         supportsAutoDuration: true,
         supportsGenerateAudio: true,
         defaultGenerateAudio: true,
+        maxReferenceImages: 9,
         referenceImageRoles: COMMON_REFERENCE_IMAGE_ROLES,
       },
     },
     priceLabel: "¥37 / 百万 tokens（图生/文生）· 视频输入 ¥22",
-    resolutionLabel: "480p / 720p / 1080p",
+    resolutionLabel: "480p / 720p",
     durationLabel: "4–15 秒 / 智能",
   },
   {
@@ -203,7 +207,7 @@ export const SEEDANCE_MODEL_PRESETS = [
       },
       video: {
         requestProfile: "seedance-2.0-mini",
-        resolutions: ["480p", "720p", "1080p"],
+        resolutions: ["480p", "720p"],
         defaultResolution: "720p",
         aspectRatios: COMMON_ASPECT_RATIOS,
         defaultAspectRatio: "adaptive",
@@ -213,11 +217,12 @@ export const SEEDANCE_MODEL_PRESETS = [
         supportsAutoDuration: true,
         supportsGenerateAudio: true,
         defaultGenerateAudio: true,
+        maxReferenceImages: 9,
         referenceImageRoles: COMMON_REFERENCE_IMAGE_ROLES,
       },
     },
     priceLabel: "¥23 / 百万 tokens（图生/文生）· 视频输入 ¥14",
-    resolutionLabel: "480p / 720p / 1080p",
+    resolutionLabel: "480p / 720p",
     durationLabel: "4–15 秒 / 智能",
   },
 ] as const satisfies readonly SeedanceModelPreset[];
