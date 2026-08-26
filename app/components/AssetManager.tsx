@@ -79,11 +79,17 @@ type AssetForm = {
 };
 type GenerateForm = {
   modelId: string;
+  mediaType: "image" | "video";
   name: string;
   category: AssetCategory;
   prompt: string;
   aspectRatio: string;
   size: string;
+  resolution: string;
+  duration: number;
+  generateAudio: boolean;
+  referenceImageUrl: string;
+  referenceImageRole: "first_frame" | "last_frame" | "reference_image";
   relations: AssetRelationInput[];
 };
 
@@ -121,11 +127,17 @@ const EMPTY_ASSET: AssetForm = {
 };
 const EMPTY_GENERATE: GenerateForm = {
   modelId: "",
+  mediaType: "image",
   name: "",
   category: "character",
   prompt: "",
   aspectRatio: "1:1",
   size: "",
+  resolution: "720p",
+  duration: 5,
+  generateAudio: false,
+  referenceImageUrl: "",
+  referenceImageRole: "first_frame",
   relations: [],
 };
 
@@ -169,6 +181,63 @@ function isImageModel(model: AiModel): boolean {
   );
 }
 
+function isVideoModel(model: AiModel): boolean {
+  const capabilities = getModelCapabilities(model).map((value) => value.trim().toLowerCase());
+  return model.enabled && model.hasApiKey && (
+    capabilities.some((value) => [
+      "video-generation",
+      "video_generation",
+      "text-to-video",
+      "image-to-video",
+      "视频生成",
+      "图生视频",
+    ].includes(value))
+    || /seedance|video[-_ ]?(?:gen|generation)|text[-_ ]?to[-_ ]?video|视频生成|图生视频/i.test(`${model.name} ${model.modelId}`)
+  );
+}
+
+type ModelVideoConfig = {
+  resolutions: string[];
+  defaultResolution: string;
+  aspectRatios: string[];
+  defaultAspectRatio: string;
+  minDuration: number;
+  maxDuration: number;
+  defaultDuration: number;
+  supportsAutoDuration: boolean;
+  supportsGenerateAudio: boolean;
+  defaultGenerateAudio: boolean;
+  referenceImageRoles: Array<GenerateForm["referenceImageRole"]>;
+};
+
+function modelVideoConfig(model: AiModel | undefined): ModelVideoConfig {
+  const value = model?.parameters.video;
+  const video = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const strings = (key: string, fallback: string[]) => Array.isArray(video[key])
+    ? (video[key] as unknown[]).filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : fallback;
+  const number = (key: string, fallback: number) => typeof video[key] === "number" && Number.isFinite(video[key])
+    ? Number(video[key])
+    : fallback;
+  const resolutions = strings("resolutions", ["480p", "720p", "1080p"]);
+  const aspectRatios = strings("aspectRatios", ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]);
+  const referenceImageRoles = strings("referenceImageRoles", ["first_frame"])
+    .filter((role): role is GenerateForm["referenceImageRole"] => ["first_frame", "last_frame", "reference_image"].includes(role));
+  return {
+    resolutions,
+    defaultResolution: typeof video.defaultResolution === "string" ? video.defaultResolution : resolutions[0] || "720p",
+    aspectRatios,
+    defaultAspectRatio: typeof video.defaultAspectRatio === "string" ? video.defaultAspectRatio : aspectRatios[0] || "16:9",
+    minDuration: number("minDuration", 4),
+    maxDuration: number("maxDuration", 15),
+    defaultDuration: number("defaultDuration", 5),
+    supportsAutoDuration: video.supportsAutoDuration === true,
+    supportsGenerateAudio: video.supportsGenerateAudio === true,
+    defaultGenerateAudio: video.defaultGenerateAudio === true,
+    referenceImageRoles,
+  };
+}
+
 function isDefinitiveGenerationSubmissionFailure(reason: unknown): boolean {
   return reason instanceof PlatformApiError && new Set([
     "VALIDATION_ERROR",
@@ -185,6 +254,14 @@ function isDefinitiveGenerationSubmissionFailure(reason: unknown): boolean {
     "MODEL_DISABLED",
     "MODEL_API_KEY_MISSING",
     "MODEL_IMAGE_UNSUPPORTED",
+    "MODEL_VIDEO_UNSUPPORTED",
+    "INVALID_GENERATION_MEDIA_TYPE",
+    "INVALID_GENERATION_OPTIONS",
+    "INVALID_VIDEO_DURATION",
+    "INVALID_VIDEO_RESOLUTION",
+    "INVALID_VIDEO_RATIO",
+    "INVALID_VIDEO_AUDIO_OPTION",
+    "INVALID_VIDEO_REFERENCE_ROLE",
     "GENERATION_REQUEST_ALREADY_USED",
   ]).has(reason.code);
 }
@@ -226,14 +303,17 @@ function formatAssetSize(sizeBytes?: number | null): string | null {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const GENERATION_PHASE_LABEL: Record<AssetGenerationJob["phase"], string> = {
-  queued: "等待生成服务",
-  model: "模型正在生成图片",
-  storage: "正在写入媒体存储",
-  finalize: "正在建立资产记录",
-  completed: "图片已生成并入库",
-  failed: "生成流程已停止",
-};
+function generationPhaseLabel(generation: AssetGenerationJob): string {
+  const mediaLabel = generation.mediaType === "video" ? "视频" : "图片";
+  return ({
+    queued: "等待生成服务",
+    model: `模型正在生成${mediaLabel}`,
+    storage: "正在写入媒体存储",
+    finalize: "正在建立资产记录",
+    completed: `${mediaLabel}已生成并入库`,
+    failed: "生成流程已停止",
+  } as Record<AssetGenerationJob["phase"], string>)[generation.phase];
+}
 
 function generationStatusLabel(status: AssetGenerationJob["status"]): string {
   if (status === "submitting") return "正在创建任务";
@@ -265,18 +345,20 @@ function GenerationCard({
   const active = generation.status === "submitting" || generation.status === "queued" || generation.status === "running";
   const submissionUnconfirmed = generation.status === "submitting"
     && generation.errorCode === "GENERATION_SUBMISSION_UNCONFIRMED";
+  const MediaIcon = generation.mediaType === "video" ? Video : ImageIcon;
+  const mediaLabel = generation.mediaType === "video" ? "视频" : "图片";
   return (
     <article
       className={joinClassNames(styles.assetCard, styles.generationCard, failed && styles.generationCardFailed)}
     >
       <div className={styles.generationPreview}>
         {failed ? <AlertCircle size={30} /> : active ? <LoaderCircle className={styles.spinner} size={30} /> : <CheckCircle2 size={30} />}
-        <span className={styles.typeBadge}><ImageIcon size={11} /> AI 图片</span>
+        <span className={styles.typeBadge}><MediaIcon size={11} /> AI {mediaLabel}</span>
       </div>
       <div className={styles.assetBody}>
         <h3>{generation.name}</h3>
         <div className={styles.assetDimensions}>
-          <span className={styles.sourceBadge}>图片</span>
+          <span className={styles.sourceBadge}>{mediaLabel}</span>
           <span className={styles.levelBadge}>{CATEGORY_META[generation.category].label}</span>
         </div>
         <p>{generation.prompt}</p>
@@ -288,7 +370,7 @@ function GenerationCard({
           )}>
             {generationStatusLabel(generation.status)}
           </span>
-          <span>{GENERATION_PHASE_LABEL[generation.phase]}</span>
+          <span>{generationPhaseLabel(generation)}</span>
         </div>
         <div
           className={styles.generationProgress}
@@ -578,7 +660,7 @@ export default function AssetManager({
       if (sequence !== modelRequestSequence.current) return;
       setModels([]);
       setModelLoadError(
-        reason instanceof Error ? reason.message : "图像模型选项加载失败。",
+        reason instanceof Error ? reason.message : "生成模型选项加载失败。",
       );
     }
   }, [projectId]);
@@ -763,7 +845,12 @@ export default function AssetManager({
     };
   }, [previewingAssetId]);
 
-  const eligibleModels = useMemo(() => models.filter(isImageModel), [models]);
+  const eligibleModels = useMemo(() => models.filter((model) => isImageModel(model) || isVideoModel(model)), [models]);
+  const selectedGenerationModel = useMemo(
+    () => eligibleModels.find((model) => model.id === generateForm.modelId),
+    [eligibleModels, generateForm.modelId],
+  );
+  const selectedVideoConfig = useMemo(() => modelVideoConfig(selectedGenerationModel), [selectedGenerationModel]);
   const visibleAssets = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return assets.filter(
@@ -889,9 +976,17 @@ export default function AssetManager({
     setDialog("asset");
   }
   function openGenerate() {
+    const model = eligibleModels[0];
+    const video = model && isVideoModel(model);
+    const config = modelVideoConfig(video ? model : undefined);
     setGenerateForm({
       ...EMPTY_GENERATE,
-      modelId: eligibleModels[0]?.id ?? "",
+      modelId: model?.id ?? "",
+      mediaType: video ? "video" : "image",
+      aspectRatio: video ? config.defaultAspectRatio : EMPTY_GENERATE.aspectRatio,
+      resolution: config.defaultResolution,
+      duration: config.defaultDuration,
+      generateAudio: config.defaultGenerateAudio,
     });
     setFormError("");
     setDirty(false);
@@ -913,6 +1008,25 @@ export default function AssetManager({
     value: GenerateForm[K],
   ) {
     setGenerateForm((current) => ({ ...current, [key]: value }));
+    setDirty(true);
+    setFormError("");
+  }
+  function selectGenerateModel(modelId: string) {
+    const model = eligibleModels.find((item) => item.id === modelId);
+    const video = model ? isVideoModel(model) : false;
+    const config = modelVideoConfig(video ? model : undefined);
+    setGenerateForm((current) => ({
+      ...current,
+      modelId,
+      mediaType: video ? "video" : "image",
+      aspectRatio: video ? config.defaultAspectRatio : "1:1",
+      size: "",
+      resolution: config.defaultResolution,
+      duration: config.defaultDuration,
+      generateAudio: config.defaultGenerateAudio,
+      referenceImageUrl: "",
+      referenceImageRole: config.referenceImageRoles[0] || "first_frame",
+    }));
     setDirty(true);
     setFormError("");
   }
@@ -1014,14 +1128,18 @@ export default function AssetManager({
   }
   async function generateAsset(event: React.FormEvent) {
     event.preventDefault();
-    if (!generateForm.modelId) return setFormError("请选择已配置的图像模型。");
+    if (!generateForm.modelId) return setFormError("请选择已配置的图片或视频模型。");
     if (!generateForm.name.trim() || !generateForm.prompt.trim())
       return setFormError("请填写资产名称与提示词。");
+    if (generateForm.mediaType === "video" && generateForm.referenceImageUrl.trim() && !isHttpUrl(generateForm.referenceImageUrl.trim())) {
+      return setFormError("参考图必须是可供模型访问的 HTTPS 地址。");
+    }
     const snapshot = {
       ...generateForm,
       name: generateForm.name.trim(),
       prompt: generateForm.prompt.trim(),
       size: generateForm.size.trim(),
+      referenceImageUrl: generateForm.referenceImageUrl.trim(),
     };
     const clientRequestId = crypto.randomUUID();
     const submissionProjectId = projectId;
@@ -1031,12 +1149,20 @@ export default function AssetManager({
       projectId,
       clientRequestId,
       modelId: snapshot.modelId,
-      modelName: eligibleModels.find((model) => model.id === snapshot.modelId)?.name ?? "图像模型",
+      modelName: eligibleModels.find((model) => model.id === snapshot.modelId)?.name ?? "生成模型",
+      mediaType: snapshot.mediaType,
       name: snapshot.name,
       category: snapshot.category,
       prompt: snapshot.prompt,
       size: snapshot.size || null,
       aspectRatio: snapshot.aspectRatio || null,
+      options: snapshot.mediaType === "video" ? {
+        resolution: snapshot.resolution,
+        duration: snapshot.duration,
+        generateAudio: snapshot.generateAudio,
+        referenceImageUrl: snapshot.referenceImageUrl || undefined,
+        referenceImageRole: snapshot.referenceImageUrl ? snapshot.referenceImageRole : undefined,
+      } : {},
       relations: snapshot.relations,
       status: "submitting",
       phase: "queued",
@@ -1066,9 +1192,21 @@ export default function AssetManager({
         method: "POST",
         headers: { "Idempotency-Key": clientRequestId },
         body: JSON.stringify({
-          ...snapshot,
+          modelId: snapshot.modelId,
+          mediaType: snapshot.mediaType,
+          name: snapshot.name,
+          category: snapshot.category,
+          prompt: snapshot.prompt,
+          aspectRatio: snapshot.aspectRatio,
           clientRequestId,
           size: snapshot.size || undefined,
+          options: snapshot.mediaType === "video" ? {
+            resolution: snapshot.resolution,
+            duration: snapshot.duration,
+            generateAudio: snapshot.generateAudio,
+            referenceImageUrl: snapshot.referenceImageUrl || undefined,
+            referenceImageRole: snapshot.referenceImageUrl ? snapshot.referenceImageRole : undefined,
+          } : undefined,
           relations: snapshot.relations,
         }),
       },
@@ -1126,11 +1264,13 @@ export default function AssetManager({
           body: JSON.stringify({
             clientRequestId: generation.clientRequestId,
             modelId: generation.modelId,
+            mediaType: generation.mediaType,
             name: generation.name,
             category: generation.category,
             prompt: generation.prompt,
             size: generation.size || undefined,
             aspectRatio: generation.aspectRatio || undefined,
+            options: generation.options,
             relations: generation.relations,
           }),
         },
@@ -1148,7 +1288,7 @@ export default function AssetManager({
         ? definitive
           ? { ...item, status: "failed", phase: "failed", retryable: false,
               errorCode: reason instanceof PlatformApiError ? reason.code : "GENERATION_JOB_CREATE_FAILED",
-              errorMessage: reason instanceof Error ? reason.message : "无法确认图片生成任务。",
+              errorMessage: reason instanceof Error ? reason.message : "无法确认资产生成任务。",
               updatedAt: new Date().toISOString() }
           : { ...item, errorMessage: "仍未收到服务器确认；可以再次安全确认，或移除这条本地记录。",
               updatedAt: new Date().toISOString() }
@@ -1290,7 +1430,7 @@ export default function AssetManager({
           role="alert"
         >
           <AlertCircle size={16} />
-          <span>图像模型选项加载失败：{modelLoadError}</span>
+          <span>生成模型选项加载失败：{modelLoadError}</span>
           <button
             className={styles.textButton}
             type="button"
@@ -1479,7 +1619,7 @@ export default function AssetManager({
                 <h3>{generationCards.length ? "当前项目还没有已入库资产" : "当前项目还没有资产"}</h3>
                 <p>
                   上传文件、登记外部
-                  URL，或使用已配置的图像模型创建首个生产资产。
+                  URL，或使用已配置的图片 / 视频模型创建首个生产资产。
                 </p>
                 <div className={styles.assetHeaderActions}>
                   <button
@@ -1947,24 +2087,22 @@ export default function AssetManager({
                   disabled={saving}
                 >
                   <div className={styles.fieldFull}>
-                    <label htmlFor="generate-model">图像模型 *</label>
+                    <label htmlFor="generate-model">生成模型 *</label>
                     <select
                       id="generate-model"
                       value={generateForm.modelId}
-                      onChange={(event) =>
-                        updateGenerate("modelId", event.target.value)
-                      }
+                      onChange={(event) => selectGenerateModel(event.target.value)}
                     >
                       <option value="">请选择模型</option>
                       {eligibleModels.map((model) => (
                         <option key={model.id} value={model.id}>
-                          {model.name}
+                          {model.name} · {isVideoModel(model) ? "视频" : "图片"}
                         </option>
                       ))}
                     </select>
                     {!eligibleModels.length && (
                       <small className={styles.fieldError}>
-                        没有已启用、配置密钥且支持图像生成的模型。
+                        没有已启用、配置密钥且支持图片或视频生成的模型。
                       </small>
                     )}
                   </div>
@@ -2013,26 +2151,81 @@ export default function AssetManager({
                     <select
                       id="generate-ratio"
                       value={generateForm.aspectRatio}
-                      onChange={(event) =>
-                        updateGenerate("aspectRatio", event.target.value)
-                      }
+                      onChange={(event) => updateGenerate("aspectRatio", event.target.value)}
                     >
-                      {["1:1", "9:16", "16:9", "3:4", "4:3"].map((ratio) => (
-                        <option key={ratio}>{ratio}</option>
-                      ))}
+                      {(generateForm.mediaType === "video"
+                        ? selectedVideoConfig.aspectRatios
+                        : ["1:1", "9:16", "16:9", "3:4", "4:3"]
+                      ).map((ratio) => <option key={ratio}>{ratio}</option>)}
                     </select>
                   </div>
-                  <div className={styles.field}>
-                    <label htmlFor="generate-size">自定义尺寸</label>
-                    <input
-                      id="generate-size"
-                      placeholder="例如 1024x1024"
-                      value={generateForm.size}
-                      onChange={(event) =>
-                        updateGenerate("size", event.target.value)
-                      }
-                    />
-                  </div>
+                  {generateForm.mediaType === "image" ? (
+                    <div className={styles.field}>
+                      <label htmlFor="generate-size">自定义尺寸</label>
+                      <input
+                        id="generate-size"
+                        placeholder="例如 1024x1024"
+                        value={generateForm.size}
+                        onChange={(event) => updateGenerate("size", event.target.value)}
+                      />
+                    </div>
+                  ) : <>
+                    <div className={styles.field}>
+                      <label htmlFor="generate-resolution">分辨率</label>
+                      <select id="generate-resolution" value={generateForm.resolution} onChange={(event) => updateGenerate("resolution", event.target.value)}>
+                        {selectedVideoConfig.resolutions.map((resolution) => <option key={resolution}>{resolution}</option>)}
+                      </select>
+                    </div>
+                    <div className={styles.field}>
+                      <label htmlFor="generate-duration">视频时长</label>
+                      <select
+                        id="generate-duration"
+                        value={generateForm.duration}
+                        onChange={(event) => updateGenerate("duration", Number(event.target.value))}
+                      >
+                        {selectedVideoConfig.supportsAutoDuration && <option value={-1}>智能时长</option>}
+                        {Array.from(
+                          { length: selectedVideoConfig.maxDuration - selectedVideoConfig.minDuration + 1 },
+                          (_, index) => selectedVideoConfig.minDuration + index,
+                        ).map((duration) => <option key={duration} value={duration}>{duration} 秒</option>)}
+                      </select>
+                      <span className={styles.fieldHint}>
+                        {selectedVideoConfig.minDuration}–{selectedVideoConfig.maxDuration} 秒
+                        {selectedVideoConfig.supportsAutoDuration ? "，或由模型智能选择" : ""}
+                      </span>
+                    </div>
+                    {selectedVideoConfig.referenceImageRoles.length > 0 && <>
+                      <div className={styles.fieldFull}>
+                        <label htmlFor="generate-reference-image">参考图地址（可选）</label>
+                        <input
+                          id="generate-reference-image"
+                          type="url"
+                          placeholder="https://…/reference.jpg"
+                          value={generateForm.referenceImageUrl}
+                          onChange={(event) => updateGenerate("referenceImageUrl", event.target.value)}
+                        />
+                        <span className={styles.fieldHint}>需为火山方舟可访问的 HTTPS 图片地址。</span>
+                      </div>
+                      {generateForm.referenceImageUrl && (
+                        <div className={styles.field}>
+                          <label htmlFor="generate-reference-role">参考方式</label>
+                          <select id="generate-reference-role" value={generateForm.referenceImageRole} onChange={(event) => updateGenerate("referenceImageRole", event.target.value as GenerateForm["referenceImageRole"])}>
+                            {selectedVideoConfig.referenceImageRoles.map((role) => (
+                              <option key={role} value={role}>{role === "first_frame" ? "首帧" : role === "last_frame" ? "尾帧" : "内容参考"}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </>}
+                    {selectedVideoConfig.supportsGenerateAudio && (
+                      <div className={styles.fieldFull}>
+                        <label className={styles.checkboxLine}>
+                          <input type="checkbox" checked={generateForm.generateAudio} onChange={(event) => updateGenerate("generateAudio", event.target.checked)} />
+                          <span><b>生成同步音频</b><small>模型会同时生成对白、环境音或配乐；这会影响 Token 费用。</small></span>
+                        </label>
+                      </div>
+                    )}
+                  </>}
                   <RelationEditor
                     characters={characters}
                     assets={selectableAssets()}

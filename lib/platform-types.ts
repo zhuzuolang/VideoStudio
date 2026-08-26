@@ -270,17 +270,29 @@ export type AssetGenerationPhase =
   | "completed"
   | "failed";
 
+export type VideoGenerationOptions = {
+  resolution?: string;
+  duration?: number;
+  generateAudio?: boolean;
+  referenceImageUrl?: string;
+  referenceImageRole?: "first_frame" | "last_frame" | "reference_image";
+};
+
 export type AssetGenerationJob = {
   id: string;
   projectId: string;
   clientRequestId: string;
   modelId: string | null;
   modelName: string;
+  mediaType: "image" | "video";
   name: string;
   category: AssetCategory;
   prompt: string;
   size: string | null;
   aspectRatio: string | null;
+  options: VideoGenerationOptions;
+  providerTaskId?: string | null;
+  nextPollAt?: string | null;
   relations: AssetRelationInput[];
   status: AssetGenerationStatus;
   phase: AssetGenerationPhase;

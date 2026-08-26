@@ -72,11 +72,13 @@ function makeGenerationJob(overrides: Partial<AssetGenerationJob> = {}): AssetGe
     clientRequestId: "request-1",
     modelId: "generation",
     modelName: "正式生图模型",
+    mediaType: "image",
     name: "即时任务卡",
     category: "character",
     prompt: "电影感人物设定",
     size: null,
     aspectRatio: "1:1",
+    options: {},
     relations: [],
     status: "queued",
     phase: "queued",
@@ -167,7 +169,7 @@ describe("AssetManager 审查项回归", () => {
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "另有 3 条" })).toBeVisible();
     expect(await screen.findByText(/人物关联选项加载失败/)).toBeVisible();
-    expect(await screen.findByText(/图像模型选项加载失败/)).toBeVisible();
+    expect(await screen.findByText(/生成模型选项加载失败/)).toBeVisible();
     expect(screen.getByRole("button", { name: "重试人物选项" })).toBeVisible();
     expect(screen.getByRole("button", { name: "重试模型选项" })).toBeVisible();
 
@@ -332,7 +334,7 @@ describe("AssetManager 审查项回归", () => {
     resolveDelete?.(jsonResponse(null));
   });
 
-  test("AI 创建仅展示真正支持生图的模型", async () => {
+  test("AI 创建仅展示真正支持生成资产的模型", async () => {
     const models = [
       makeModel({
         id: "vision",
@@ -358,12 +360,12 @@ describe("AssetManager 审查项回归", () => {
       await screen.findByRole("button", { name: "AI 创建资产" }),
     );
 
-    const select = screen.getByRole("combobox", { name: "图像模型 *" });
+    const select = screen.getByRole("combobox", { name: "生成模型 *" });
     expect(
       within(select).queryByRole("option", { name: "Image Vision" }),
     ).toBeNull();
     expect(
-      within(select).getByRole("option", { name: "正式生图模型" }),
+      within(select).getByRole("option", { name: "正式生图模型 · 图片" }),
     ).toBeVisible();
   });
 
@@ -387,11 +389,13 @@ describe("AssetManager 审查项回归", () => {
             clientRequestId: String((JSON.parse(String(init.body)) as { clientRequestId: string }).clientRequestId),
             modelId: model.id,
             modelName: model.name,
+            mediaType: "image",
             name: "浪子基础建模",
             category: "character",
             prompt: "A Pose，漫画风格",
             size: null,
             aspectRatio: "1:1",
+            options: {},
             relations: [],
             status: "queued",
             phase: "queued",

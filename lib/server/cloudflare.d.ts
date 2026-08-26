@@ -25,11 +25,15 @@ interface D1Database {
   batch<T = Record<string, unknown>>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
 }
 
-interface R2ObjectBody {
-  body: ReadableStream<Uint8Array>;
+interface R2Object {
   size: number;
   httpEtag: string;
   httpMetadata?: { contentType?: string };
+}
+
+interface R2ObjectBody extends R2Object {
+  body: ReadableStream<Uint8Array>;
+  range?: { offset: number; length: number };
   text(): Promise<string>;
   arrayBuffer(): Promise<ArrayBuffer>;
 }
@@ -40,7 +44,8 @@ interface R2Bucket {
     value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null,
     options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> },
   ): Promise<unknown>;
-  get(key: string): Promise<R2ObjectBody | null>;
+  head(key: string): Promise<R2Object | null>;
+  get(key: string, options?: { range?: { offset: number; length: number } | Headers }): Promise<R2ObjectBody | null>;
   delete(keys: string | string[]): Promise<void>;
 }
 

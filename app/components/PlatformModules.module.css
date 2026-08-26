@@ -262,6 +262,177 @@
   background: color-mix(in srgb, var(--module-warning) 8%, var(--module-paper));
 }
 
+.presetSection {
+  display: grid;
+  gap: 13px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--module-accent) 18%, var(--module-line));
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--module-accent) 10%, transparent), transparent 34%),
+    var(--module-paper);
+}
+
+.presetHeading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.presetHeading h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.presetHeading p {
+  margin: 5px 0 0;
+  color: var(--module-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.presetHeading > span {
+  flex: none;
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: var(--module-accent-strong);
+  background: var(--module-accent-soft);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.presetGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.presetCard {
+  display: grid;
+  min-width: 0;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid var(--module-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--module-paper) 94%, var(--module-soft));
+}
+
+.presetCardConfigured {
+  border-color: color-mix(in srgb, var(--module-success) 34%, var(--module-line));
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--module-success) 45%, transparent);
+}
+
+.presetCardTitle {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.presetIcon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: var(--module-accent-strong);
+  background: var(--module-accent-soft);
+}
+
+.presetCardTitle h4 {
+  overflow: hidden;
+  margin: 0;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presetCardTitle p {
+  overflow: hidden;
+  margin: 3px 0 0;
+  color: var(--module-muted);
+  font-family: var(--font-geist-mono, monospace);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presetConfiguredBadge,
+.presetPendingBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 21px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.presetConfiguredBadge {
+  color: var(--module-success);
+  background: color-mix(in srgb, var(--module-success) 10%, var(--module-paper));
+}
+
+.presetPendingBadge {
+  color: var(--module-muted);
+  background: var(--module-soft);
+}
+
+.presetPrice {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border-radius: 9px;
+  background: var(--module-soft);
+}
+
+.presetPrice span,
+.presetPrice small {
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.presetPrice strong {
+  color: var(--module-ink);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.presetSpecs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0;
+}
+
+.presetSpecs div {
+  min-width: 0;
+}
+
+.presetSpecs dt {
+  margin-bottom: 3px;
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.presetSpecs dd {
+  overflow: hidden;
+  margin: 0;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.presetAction {
+  width: 100%;
+  min-height: 32px;
+  margin-top: auto;
+}
+
 .modelGrid,
 .assetGrid {
   display: grid;
@@ -1896,6 +2067,10 @@
 }
 
 @media (max-width: 1180px) {
+  .presetGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .modelGrid,
   .assetGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1904,12 +2079,21 @@
 
 @media (max-width: 860px) {
   .toolbar,
-  .filterToolbar {
+  .filterToolbar,
+  .presetHeading {
     align-items: stretch;
   }
 
   .toolbar {
     flex-direction: column;
+  }
+
+  .presetHeading {
+    flex-direction: column;
+  }
+
+  .presetHeading > span {
+    align-self: flex-start;
   }
 
   .toolbar > .primaryButton {
@@ -1938,6 +2122,7 @@
 }
 
 @media (max-width: 620px) {
+  .presetGrid,
   .modelGrid,
   .assetGrid,
   .formGrid {

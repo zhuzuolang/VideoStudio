@@ -14,9 +14,11 @@ import {
   RefreshCw,
   Settings2,
   Trash2,
+  Video,
   X,
 } from "lucide-react";
 import type { AiModel, AiModelInput } from "@/lib/platform-types";
+import { SEEDANCE_MODEL_PRESETS } from "@/lib/seedance-model-presets";
 import { apiRequest, getModelCapabilities, isRecord, joinClassNames, PlatformApiError } from "./platform-client";
 import styles from "./PlatformModules.module.css";
 
@@ -43,11 +45,17 @@ type ModelFormErrors = Partial<Record<keyof ModelForm, string>>;
 
 type ModelTestResult = {
   status: "success" | "failed";
-  type: "text" | "image" | "unknown";
+  type: "text" | "image" | "video" | "unknown";
   latencyMs: number;
   summary: string;
   previewUrl?: string;
 };
+
+type SeedanceModelPreset = (typeof SEEDANCE_MODEL_PRESETS)[number];
+
+const SORTED_SEEDANCE_PRESETS = [...SEEDANCE_MODEL_PRESETS].sort(
+  (left, right) => left.parameters.sortOrder - right.parameters.sortOrder,
+);
 
 const EMPTY_FORM: ModelForm = {
   name: "",
@@ -75,6 +83,28 @@ function modelToForm(model: AiModel): ModelForm {
     enabled: model.enabled,
     clearApiKey: false,
   };
+}
+
+function presetToForm(preset: SeedanceModelPreset): ModelForm {
+  return {
+    name: preset.name,
+    provider: preset.provider,
+    modelId: preset.modelId,
+    level: preset.level,
+    endpoint: preset.endpoint,
+    iconUrl: "",
+    capabilities: preset.capabilities.join(", "),
+    apiKey: "",
+    enabled: true,
+    clearApiKey: false,
+  };
+}
+
+function modelMatchesPreset(model: AiModel, preset: SeedanceModelPreset): boolean {
+  const configuredPresetKey = model.parameters?.presetKey;
+  return typeof configuredPresetKey === "string"
+    ? configuredPresetKey === preset.parameters.presetKey
+    : model.modelId === preset.modelId;
 }
 
 function parseCapabilities(value: string): string[] {
@@ -120,6 +150,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [editing, setEditing] = useState<AiModel | null | undefined>(undefined);
+  const [selectedPreset, setSelectedPreset] = useState<SeedanceModelPreset | null>(null);
   const [form, setForm] = useState<ModelForm>(EMPTY_FORM);
   const [formErrors, setFormErrors] = useState<ModelFormErrors>({});
   const [saving, setSaving] = useState(false);
@@ -179,6 +210,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
     function handleEscape(event: KeyboardEvent) {
       if (event.key !== "Escape" || saving) return;
       if (!dirty || window.confirm("当前修改尚未保存，确定关闭吗？")) {
+        setSelectedPreset(null);
         setEditing(undefined);
       }
     }
@@ -191,6 +223,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
   const activeCount = useMemo(() => models.filter((model) => model.enabled).length, [models]);
 
   function openCreate() {
+    setSelectedPreset(null);
     setForm(EMPTY_FORM);
     setFormErrors({});
     setDirty(false);
@@ -198,15 +231,27 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
   }
 
   function openEdit(model: AiModel) {
+    setSelectedPreset(null);
     setForm(modelToForm(model));
     setFormErrors({});
     setDirty(false);
     setEditing(model);
   }
 
+  function openPreset(preset: SeedanceModelPreset, configuredModel?: AiModel) {
+    setSelectedPreset(preset);
+    setForm(configuredModel
+      ? { ...modelToForm(configuredModel), capabilities: preset.capabilities.join(", ") }
+      : presetToForm(preset));
+    setFormErrors({});
+    setDirty(false);
+    setEditing(configuredModel ?? null);
+  }
+
   function closeForm() {
     if (saving) return;
     if (dirty && !window.confirm("当前修改尚未保存，确定关闭吗？")) return;
+    setSelectedPreset(null);
     setEditing(undefined);
   }
 
@@ -248,7 +293,8 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
       enabled: form.enabled,
       parameters: {
         ...existingParameters,
-        capabilities: parseCapabilities(form.capabilities),
+        ...(selectedPreset?.parameters ?? {}),
+        capabilities: selectedPreset ? [...selectedPreset.capabilities] : parseCapabilities(form.capabilities),
       },
     };
     if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
@@ -266,6 +312,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
           body: JSON.stringify(body),
         });
       }
+      setSelectedPreset(null);
       setEditing(undefined);
       setDirty(false);
       setSuccess(editing ? "模型配置已更新。" : "模型已添加到全局模型中心。");
@@ -324,7 +371,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
         ...current,
         [model.id]: {
           status: "failed",
-          type: details?.type === "text" || details?.type === "image" ? details.type : "unknown",
+          type: details?.type === "text" || details?.type === "image" || details?.type === "video" ? details.type : "unknown",
           latencyMs: typeof details?.latencyMs === "number" ? details.latencyMs : Date.now() - startedAt,
           summary: requestError instanceof Error ? requestError.message : "模型连接测试失败，请重试。",
         },
@@ -369,6 +416,65 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
           <span>{success}</span>
         </div>
       )}
+
+      <section className={styles.presetSection} aria-labelledby="seedance-preset-title">
+        <div className={styles.presetHeading}>
+          <div>
+            <span className={styles.eyebrow}>OFFICIAL VIDEO PRESETS</span>
+            <h3 id="seedance-preset-title">Seedance 视频模型</h3>
+            <p>按官方产品与价格拆分为独立卡片。选择后会预填对应接口、规格与请求参数。</p>
+          </div>
+          <span>{SORTED_SEEDANCE_PRESETS.length} 个官方预设</span>
+        </div>
+        <div className={styles.presetGrid}>
+          {SORTED_SEEDANCE_PRESETS.map((preset) => {
+            const configuredModel = models.find((model) => modelMatchesPreset(model, preset));
+            const stateLabel = loading ? "检查中" : configuredModel ? "已配置" : "未配置";
+            return (
+              <article
+                className={joinClassNames(styles.presetCard, configuredModel && styles.presetCardConfigured)}
+                key={preset.presetId}
+                aria-labelledby={`seedance-preset-${preset.presetId}`}
+              >
+                <div className={styles.presetCardTitle}>
+                  <span className={styles.presetIcon} aria-hidden="true"><Video size={18} /></span>
+                  <div>
+                    <h4 id={`seedance-preset-${preset.presetId}`}>{preset.name}</h4>
+                    <p title={preset.modelId}>{preset.modelId}</p>
+                  </div>
+                  <span className={configuredModel ? styles.presetConfiguredBadge : styles.presetPendingBadge}>
+                    {configuredModel && <CheckCircle2 size={11} />}{stateLabel}
+                  </span>
+                </div>
+                <div className={styles.presetPrice}>
+                  <span>官方参考价格</span>
+                  <strong>{preset.priceLabel}</strong>
+                  <small>最终费用以火山方舟实际账单为准</small>
+                </div>
+                <dl className={styles.presetSpecs}>
+                  <div><dt>分辨率</dt><dd>{preset.resolutionLabel}</dd></div>
+                  <div><dt>时长</dt><dd>{preset.durationLabel}</dd></div>
+                  <div><dt>输入方式</dt><dd>{preset.parameters.pricing.withVideoInputLabel ? "文生 / 图生视频" : "视频生成"}</dd></div>
+                  <div><dt>API Key</dt><dd>{configuredModel?.hasApiKey ? configuredModel.apiKeyMasked || "已配置" : "逐卡配置"}</dd></div>
+                </dl>
+                <div className={styles.capabilityList} aria-label={`${preset.name} 模型能力`}>
+                  {preset.capabilities.map((capability) => <span className={styles.capability} key={capability}>{capability}</span>)}
+                </div>
+                <button
+                  className={joinClassNames(configuredModel ? styles.secondaryButton : styles.primaryButton, styles.presetAction)}
+                  type="button"
+                  aria-label={`${configuredModel ? "编辑已配置" : "配置"} Seedance 预设 ${preset.name}`}
+                  onClick={() => openPreset(preset, configuredModel)}
+                  disabled={loading}
+                >
+                  {configuredModel ? <Pencil size={13} /> : <Plus size={13} />}
+                  {configuredModel ? "编辑已配置卡片" : "配置此模型"}
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      </section>
 
       {loading ? (
         <div className={styles.stateBox} aria-live="polite">
@@ -418,7 +524,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
                     <div>
                       {testResult.status === "success" ? <CheckCircle2 size={13} /> : <AlertCircle size={13} />}
                       <b>{testResult.status === "success" ? "连接成功" : "连接失败"}</b>
-                      <span>{testResult.type === "image" ? "图像" : testResult.type === "text" ? "文本" : "模型"} · {testResult.latencyMs} ms</span>
+                      <span>{testResult.type === "image" ? "图像" : testResult.type === "video" ? "视频" : testResult.type === "text" ? "文本" : "模型"} · {testResult.latencyMs} ms</span>
                     </div>
                     <p>{testResult.summary}</p>
                     {testResult.previewUrl && <small>已收到安全的 HTTPS 图像预览地址，本次测试未写入资产库。</small>}
@@ -443,7 +549,10 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
           <div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="model-dialog-title">
             <form onSubmit={saveModel} noValidate aria-busy={saving}>
               <header className={styles.dialogHeader}>
-                <div><h2 id="model-dialog-title">{editing ? "编辑模型" : "添加 AI 模型"}</h2><p>{editing ? "留空 API Key 即保留当前密钥。" : "配置完成后，所有项目都可以选择该模型。"}</p></div>
+                <div>
+                  <h2 id="model-dialog-title">{selectedPreset ? `${editing ? "编辑" : "配置"} Seedance 预设` : editing ? "编辑模型" : "添加 AI 模型"}</h2>
+                  <p>{selectedPreset ? `${selectedPreset.name} 的价格档、视频规格与请求 profile 会随模型一起保存；API Key 仅用于当前卡片。` : editing ? "留空 API Key 即保留当前密钥。" : "配置完成后，所有项目都可以选择该模型。"}</p>
+                </div>
                 <button className={styles.iconButton} type="button" aria-label="关闭模型表单" onClick={closeForm} disabled={saving}><X size={16} /></button>
               </header>
               <div className={styles.dialogBody}>
@@ -481,14 +590,14 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
                   </div>
                   <div className={styles.fieldFull}>
                     <label htmlFor="model-capabilities">模型能力<span className={styles.requiredMark}>*</span></label>
-                    <input id="model-capabilities" value={form.capabilities} onChange={(event) => updateForm("capabilities", event.target.value)} aria-invalid={Boolean(formErrors.capabilities)} placeholder="文本分析, 图片理解, 视频生成" disabled={saving} />
+                    <input id="model-capabilities" value={form.capabilities} onChange={(event) => updateForm("capabilities", event.target.value)} aria-invalid={Boolean(formErrors.capabilities)} placeholder="文本分析, 图片理解, 视频生成" disabled={saving || Boolean(selectedPreset)} />
                     <span className={styles.fieldHint}>用逗号分隔，Agent 会据此提示模型适用范围。</span>
                     {formErrors.capabilities && <span className={styles.fieldError}>{formErrors.capabilities}</span>}
                   </div>
                   <fieldset className={styles.fieldset}>
                     <legend><KeyRound size={12} /> API Key</legend>
                     <div className={styles.fieldFull}>
-                      <input id="model-api-key" type="password" value={form.apiKey} onChange={(event) => { updateForm("apiKey", event.target.value); if (event.target.value) updateForm("clearApiKey", false); }} placeholder={editing?.hasApiKey ? `当前：${editing.apiKeyMasked || "••••••••"}（留空不修改）` : "输入服务商 API Key"} autoComplete="new-password" disabled={saving} />
+                      <input id="model-api-key" aria-label="API Key" type="password" value={form.apiKey} onChange={(event) => { updateForm("apiKey", event.target.value); if (event.target.value) updateForm("clearApiKey", false); }} placeholder={editing?.hasApiKey ? `当前：${editing.apiKeyMasked || "••••••••"}（留空不修改）` : "输入服务商 API Key"} autoComplete="new-password" disabled={saving} />
                       <span className={styles.fieldHint}>密钥不会回显。编辑时留空表示保留原值。</span>
                     </div>
                     {editing?.hasApiKey && (

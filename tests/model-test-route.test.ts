@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   callConfiguredModel: vi.fn(),
   modelSupportsImageGeneration: vi.fn(),
   generateImageWithModel: vi.fn(),
+  modelSupportsVideoGeneration: vi.fn(),
+  testVideoGenerationConnection: vi.fn(),
 }));
 
 vi.mock("@/lib/server/context", () => ({ apiContext: mocks.apiContext }));
@@ -14,6 +16,10 @@ vi.mock("@/lib/server/agent", () => ({ callConfiguredModel: mocks.callConfigured
 vi.mock("@/lib/server/image-generation", () => ({
   modelSupportsImageGeneration: mocks.modelSupportsImageGeneration,
   generateImageWithModel: mocks.generateImageWithModel,
+}));
+vi.mock("@/lib/server/video-generation", () => ({
+  modelSupportsVideoGeneration: mocks.modelSupportsVideoGeneration,
+  testVideoGenerationConnection: mocks.testVideoGenerationConnection,
 }));
 
 import { POST } from "@/app/api/models/[modelId]/test/route";
@@ -42,6 +48,7 @@ beforeEach(() => {
   mocks.apiContext.mockResolvedValue({ db: {}, identity: { userId: model.owner_id } });
   mocks.requireOwnedModel.mockResolvedValue({ ...model });
   mocks.modelSupportsImageGeneration.mockReturnValue(false);
+  mocks.modelSupportsVideoGeneration.mockReturnValue(false);
 });
 
 describe("POST /api/models/[modelId]/test", () => {
@@ -95,5 +102,23 @@ describe("POST /api/models/[modelId]/test", () => {
     expect(JSON.stringify(payload)).not.toContain("bytes");
     expect(JSON.stringify(payload)).not.toContain("b64");
     expect(JSON.stringify(payload)).not.toContain("data:image");
+  });
+
+  test("视频模型使用不计费的任务列表接口验证连接", async () => {
+    mocks.modelSupportsVideoGeneration.mockReturnValue(true);
+    mocks.testVideoGenerationConnection.mockResolvedValue({ taskCount: 0 });
+
+    const response = await POST(request(), context());
+    const payload = await response.json() as { data: Record<string, unknown> };
+
+    expect(response.status).toBe(200);
+    expect(mocks.testVideoGenerationConnection).toHaveBeenCalledWith(expect.objectContaining({ id: model.id }));
+    expect(mocks.generateImageWithModel).not.toHaveBeenCalled();
+    expect(mocks.callConfiguredModel).not.toHaveBeenCalled();
+    expect(payload.data).toMatchObject({
+      type: "video",
+      status: "success",
+      summary: "视频任务 API 与密钥连接正常（未创建计费视频）。",
+    });
   });
 });

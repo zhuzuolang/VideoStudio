@@ -3,10 +3,11 @@ import { ApiError, errorResponse, ok } from "@/lib/server/api";
 import { apiContext, type RouteContext } from "@/lib/server/context";
 import { generateImageWithModel, modelSupportsImageGeneration } from "@/lib/server/image-generation";
 import { requireOwnedModel } from "@/lib/server/store";
+import { modelSupportsVideoGeneration, testVideoGenerationConnection } from "@/lib/server/video-generation";
 
 export const dynamic = "force-dynamic";
 
-type ModelTestType = "text" | "image";
+type ModelTestType = "text" | "image" | "video";
 
 function compactSummary(value: string, maxLength = 240): string {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -20,10 +21,20 @@ export async function POST(request: Request, context: RouteContext<{ modelId: st
     const { modelId } = await context.params;
     const { db, identity } = await apiContext(request);
     const model = await requireOwnedModel(db, modelId, identity.userId);
-    type = modelSupportsImageGeneration(model) ? "image" : "text";
+    type = modelSupportsVideoGeneration(model) ? "video" : modelSupportsImageGeneration(model) ? "image" : "text";
     if (!model.enabled) throw new ApiError(400, "MODEL_DISABLED", "该模型已停用，请启用后再测试。 ");
     if (!model.api_key_ciphertext || !model.api_key_iv) {
       throw new ApiError(400, "MODEL_API_KEY_MISSING", "该模型尚未配置 API Key。 ");
+    }
+
+    if (type === "video") {
+      await testVideoGenerationConnection(model);
+      return ok({
+        type,
+        status: "success",
+        latencyMs: Date.now() - startedAt,
+        summary: "视频任务 API 与密钥连接正常（未创建计费视频）。",
+      });
     }
 
     if (type === "image") {

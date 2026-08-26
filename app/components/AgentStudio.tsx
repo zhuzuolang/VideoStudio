@@ -97,6 +97,34 @@ function toggleId(values: string[], id: string): string[] {
   return values.includes(id) ? values.filter((value) => value !== id) : [...values, id];
 }
 
+const TEXT_AGENT_CAPABILITIES = new Set([
+  "text",
+  "analysis",
+  "chat",
+  "chat-completions",
+  "text-analysis",
+  "text-generation",
+  "文本",
+  "文本分析",
+  "文本生成",
+  "剧本创作",
+]);
+
+function isTextAgentModel(model: AiModel): boolean {
+  const capabilities = getModelCapabilities(model).map((capability) => capability.trim().toLocaleLowerCase("en-US"));
+  const isVideoModel = capabilities.some((capability) =>
+    capability === "video"
+    || capability === "video-generation"
+    || capability === "video_generation"
+    || capability === "text-to-video"
+    || capability === "image-to-video"
+    || capability === "视频"
+    || capability === "视频生成",
+  );
+  if (!isVideoModel) return true;
+  return capabilities.some((capability) => TEXT_AGENT_CAPABILITIES.has(capability));
+}
+
 export default function AgentStudio({
   projectId,
   projectName,
@@ -130,8 +158,9 @@ export default function AgentStudio({
   const runRequestSequence = useRef(0);
   const projectIdRef = useRef(projectId);
 
-  const eligibleModels = useMemo(() => models.filter((model) => model.enabled && model.hasApiKey), [models]);
-  const selectedModel = useMemo(() => models.find((model) => model.id === modelId) ?? null, [modelId, models]);
+  const textAgentModels = useMemo(() => models.filter(isTextAgentModel), [models]);
+  const eligibleModels = useMemo(() => textAgentModels.filter((model) => model.enabled && model.hasApiKey), [textAgentModels]);
+  const selectedModel = useMemo(() => textAgentModels.find((model) => model.id === modelId) ?? null, [modelId, textAgentModels]);
   const workspaceReady = loadedProjectId === projectId;
 
   const sortedRuns = useMemo(
@@ -172,7 +201,7 @@ export default function AgentStudio({
       setEpisodeCount(Array.isArray(data.episodes) ? data.episodes.length : 0);
       setRuns(nextRuns);
       setActiveRun(initialRun);
-      const firstEligible = nextModels.find((model) => model.enabled && model.hasApiKey);
+      const firstEligible = nextModels.find((model) => isTextAgentModel(model) && model.enabled && model.hasApiKey);
       setModelId(firstEligible?.id ?? "");
       setSources({ ...EMPTY_SOURCES, includeStory: Boolean(data.story) });
       setGoal(initialGoal);
@@ -283,7 +312,7 @@ export default function AgentStudio({
       return;
     }
     if (!selectedModel?.enabled || !selectedModel.hasApiKey) {
-      setFormError("所选模型不可用，请在模型中心检查启用状态和 API Key。");
+      setFormError("所选文本模型不可用，请在模型中心检查能力、启用状态和 API Key。");
       return;
     }
     if (!goal.trim()) {
@@ -363,10 +392,10 @@ export default function AgentStudio({
               <label htmlFor="agent-model">执行模型<span className={styles.requiredMark}>*</span></label>
               <select id="agent-model" value={modelId} onChange={(event) => { setModelId(event.target.value); setFormError(""); }} disabled={eligibleModels.length === 0 || submitting}>
                 <option value="">选择 AI 模型</option>
-                {models.map((model) => <option key={model.id} value={model.id} disabled={!model.enabled || !model.hasApiKey}>{model.name} · {model.level}{!model.enabled ? "（已停用）" : !model.hasApiKey ? "（未配置 Key）" : ""}</option>)}
+                {textAgentModels.map((model) => <option key={model.id} value={model.id} disabled={!model.enabled || !model.hasApiKey}>{model.name} · {model.level}{!model.enabled ? "（已停用）" : !model.hasApiKey ? "（未配置 Key）" : ""}</option>)}
               </select>
               {selectedModel && <span className={styles.fieldHint}>{selectedModel.provider} · {selectedModel.modelId} · {getModelCapabilities(selectedModel).join(" / ") || "未标注能力"}</span>}
-              {eligibleModels.length === 0 && <div className={joinClassNames(styles.notice, styles.noticeError)}><AlertCircle size={15} /><span>没有已启用且已配置 API Key 的模型。请先在模型中心完成配置。</span>{onOpenModels && <button type="button" className={styles.textButton} onClick={onOpenModels}>前往模型中心 <ChevronRight size={13} /></button>}</div>}
+              {eligibleModels.length === 0 && <div className={joinClassNames(styles.notice, styles.noticeError)}><AlertCircle size={15} /><span>没有已启用且已配置 API Key 的文本模型。请先在模型中心完成配置。</span>{onOpenModels && <button type="button" className={styles.textButton} onClick={onOpenModels}>前往模型中心 <ChevronRight size={13} /></button>}</div>}
             </div>
 
             <div className={styles.fieldFull}>

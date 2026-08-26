@@ -49,6 +49,15 @@ test("供应商模糊结果不可重试，明确限流仍允许重试", () => {
   expect(generationFailure(new ApiError(404, "MODEL_NOT_FOUND", "missing model")).retryable).toBe(false);
 });
 
+test("视频创建响应不确定时禁止重提，但安全轮询与入库失败可以重试", () => {
+  const timeout = new ApiError(502, "VIDEO_MODEL_TIMEOUT", "timeout");
+  expect(generationFailure(timeout, true, "video").retryable).toBe(false);
+  expect(generationFailure(timeout, false, "video").retryable).toBe(true);
+  expect(generationFailure(new ApiError(502, "VIDEO_RESPONSE_STREAM_FAILED", "body interrupted"), true, "video").retryable).toBe(false);
+  expect(generationFailure(new ApiError(422, "VIDEO_TASK_FAILED", "failed"), false, "video").retryable).toBe(false);
+  expect(generationFailure(new ApiError(503, "VIDEO_STORAGE_FAILED", "r2"), false, "video").retryable).toBe(true);
+});
+
 test("达到三次尝试或已归档的任务不会再次被 runner 认领", () => {
   expect(serializeAssetGeneration({ ...baseRow, attemptCount: 3 })).toMatchObject({
     canRun: false,
@@ -57,4 +66,28 @@ test("达到三次尝试或已归档的任务不会再次被 runner 认领", () 
   expect(serializeAssetGeneration({ ...baseRow, dismissedAt: "2026-08-23T01:00:00.000Z" })).toMatchObject({
     canRun: false,
   });
+});
+
+test("视频轮询尊重 nextPollAt，丢失供应商任务号时不自动重提", () => {
+  expect(serializeAssetGeneration({
+    ...baseRow,
+    mediaType: "video",
+    optionsJson: "{}",
+    providerTaskId: "cgt-1",
+    nextPollAt: "2999-01-01T00:00:00.000Z",
+  }).canRun).toBe(false);
+  expect(serializeAssetGeneration({
+    ...baseRow,
+    mediaType: "video",
+    optionsJson: "{}",
+    providerTaskId: "cgt-1",
+    nextPollAt: "2020-01-01T00:00:00.000Z",
+  }).canRun).toBe(true);
+  expect(serializeAssetGeneration({
+    ...baseRow,
+    mediaType: "video",
+    optionsJson: "{}",
+    providerTaskId: null,
+    nextPollAt: null,
+  }).canRun).toBe(false);
 });

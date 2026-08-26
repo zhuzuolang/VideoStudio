@@ -1,14 +1,31 @@
 import { ApiError, errorResponse, id, jsonText, noContent, nowIso, ok, optionalBoolean, readJsonObject } from "@/lib/server/api";
-import { generationFailure, getAssetGeneration, getGenerationStorageKey, persistGenerationFailure, renewGenerationLease, setGenerationStorageKey, updateGenerationProgress } from "@/lib/server/asset-generation-jobs";
+import {
+  generationFailure,
+  getAssetGeneration,
+  getGenerationStorageKey,
+  persistGenerationFailure,
+  persistGenerationProviderTask,
+  releaseGenerationForPolling,
+  renewGenerationLease,
+  setGenerationStorageKey,
+  updateGenerationProgress,
+} from "@/lib/server/asset-generation-jobs";
 import { safeFilename } from "@/lib/server/assets";
 import { apiContext, type RouteContext } from "@/lib/server/context";
 import { generateImageWithModel } from "@/lib/server/image-generation";
 import { mediaBucket } from "@/lib/server/runtime";
 import { prepareGeneratedAssetRelationStatements, requireOwnedModel, requireOwnedProject, validateAssetRelationTargets } from "@/lib/server/store";
+import {
+  buildVideoGenerationRequest,
+  createVideoGenerationTask,
+  getVideoGenerationTask,
+  openGeneratedVideoStream,
+} from "@/lib/server/video-generation";
 
 export const dynamic = "force-dynamic";
 const LEASE_MS = 300_000;
 const LEASE_HEARTBEAT_MS = 45_000;
+const VIDEO_POLL_AFTER_MS = 5_000;
 
 export async function GET(request: Request, context: RouteContext<{ projectId: string; generationId: string }>): Promise<Response> {
   try {
@@ -68,6 +85,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
   let leaseHeartbeat: ReturnType<typeof setInterval> | null = null;
   let leaseAbortController: AbortController | null = null;
   let providerInvoked = false;
+  let generationMediaType: "image" | "video" = "image";
   try {
     const params = await context.params;
     generationId = params.generationId;
@@ -79,6 +97,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     const body = await readJsonObject(request);
     const retry = optionalBoolean(body, "retry") ?? false;
     const generation = await getAssetGeneration(db, projectId, identity.userId, generationId);
+    generationMediaType = generation.mediaType;
 
     if (generation.status === "succeeded") return ok({ generation });
     if (generation.status === "failed" && !retry) {
@@ -98,18 +117,22 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
       ? await db.prepare(`UPDATE asset_generation_jobs SET
           status = 'running', phase = 'model', progress = 15, attempt_count = attempt_count + 1,
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
-          updated_at = ?, started_at = ?, completed_at = NULL
+          next_poll_at = NULL, updated_at = ?, started_at = ?, completed_at = NULL
         WHERE id = ? AND project_id = ? AND owner_id = ? AND status = 'failed'
           AND dismissed_at IS NULL AND attempt_count < 3`)
         .bind(leaseToken, leaseExpiresAt, now, now, generationId, projectId, identity.userId).run()
       : await db.prepare(`UPDATE asset_generation_jobs SET
-          status = 'running', phase = 'model', progress = 15, attempt_count = attempt_count + 1,
+          status = 'running', phase = 'model', progress = MAX(progress, 15),
+          attempt_count = attempt_count + CASE WHEN provider_task_id IS NULL THEN 1 ELSE 0 END,
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
-          updated_at = ?, started_at = COALESCE(started_at, ?), completed_at = NULL
+          next_poll_at = NULL, updated_at = ?, started_at = COALESCE(started_at, ?), completed_at = NULL
         WHERE id = ? AND project_id = ? AND owner_id = ?
           AND dismissed_at IS NULL AND attempt_count < 3
-          AND (status = 'queued' OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))`)
-        .bind(leaseToken, leaseExpiresAt, now, now, generationId, projectId, identity.userId, now).run();
+          AND (status = 'queued' OR (status = 'running'
+            AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+            AND (next_poll_at IS NULL OR next_poll_at <= ?)
+            AND NOT (media_type = 'video' AND provider_task_id IS NULL AND attempt_count > 0)))`)
+        .bind(leaseToken, leaseExpiresAt, now, now, generationId, projectId, identity.userId, now, now).run();
 
     if (!claim.meta.changes) {
       return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
@@ -131,7 +154,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
       bucket = mediaBucket();
     } catch (error) {
       console.error("Media bucket binding is unavailable", { projectId, generationId, error });
-      throw new ApiError(503, "MEDIA_STORAGE_UNAVAILABLE", "媒体存储尚未配置或暂时不可用，图片模型尚未开始调用。");
+      throw new ApiError(503, "MEDIA_STORAGE_UNAVAILABLE", "媒体存储尚未配置或暂时不可用，生成模型尚未开始调用。");
     }
     const previousStorageKey = await getGenerationStorageKey(db, generationId, leaseToken);
     if (previousStorageKey) {
@@ -140,30 +163,124 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
         await setGenerationStorageKey(db, generationId, leaseToken, null);
       } catch (error) {
         console.error("Previous generation media cleanup failed", { projectId, generationId, previousStorageKey, error });
-        throw new ApiError(503, "GENERATION_CLEANUP_FAILED", "上一次尝试留下的媒体文件暂时无法清理，图片模型尚未重新调用。");
+        throw new ApiError(503, "GENERATION_CLEANUP_FAILED", "上一次尝试留下的媒体文件暂时无法清理，生成模型尚未重新调用。");
       }
     }
-    providerInvoked = true;
-    const generated = await generateImageWithModel(model, {
-      prompt: generation.prompt,
-      size: generation.size || undefined,
-      aspectRatio: generation.aspectRatio || undefined,
-      signal: leaseAbortController.signal,
-    });
-    await updateGenerationProgress(db, generationId, leaseToken, "storage", 82);
+    let generatedBytes: Uint8Array | null = null;
+    let generatedVideoStream: Awaited<ReturnType<typeof openGeneratedVideoStream>> | null = null;
+    let generatedMimeType: string;
+    let generatedSize = 0;
+    let revisedPrompt: string | null = null;
+    let providerUsage: Record<string, unknown> | null = null;
+    let resolvedProviderTaskId = generation.providerTaskId ?? null;
+
+    if (generation.mediaType === "video") {
+      const videoInput = {
+        prompt: generation.prompt,
+        resolution: generation.options.resolution,
+        aspectRatio: generation.aspectRatio || undefined,
+        duration: generation.options.duration,
+        generateAudio: generation.options.generateAudio,
+        referenceImageUrl: generation.options.referenceImageUrl,
+        referenceImageRole: generation.options.referenceImageRole,
+        signal: leaseAbortController.signal,
+      };
+      if (!resolvedProviderTaskId) {
+        // Validate the model-specific profile before marking the call as potentially billable.
+        buildVideoGenerationRequest(model, videoInput);
+        providerInvoked = true;
+        const created = await createVideoGenerationTask(model, videoInput);
+        resolvedProviderTaskId = created.taskId;
+        await persistGenerationProviderTask(
+          db,
+          generationId,
+          leaseToken,
+          resolvedProviderTaskId,
+          VIDEO_POLL_AFTER_MS,
+        );
+        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+        leaseHeartbeat = null;
+        leaseToken = "";
+        return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
+      }
+
+      const task = await getVideoGenerationTask(model, resolvedProviderTaskId);
+      if (task.status === "queued" || task.status === "running") {
+        const progress = task.status === "queued" ? 35 : Math.max(50, generation.progress);
+        await releaseGenerationForPolling(db, generationId, leaseToken, progress, VIDEO_POLL_AFTER_MS);
+        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+        leaseHeartbeat = null;
+        leaseToken = "";
+        return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
+      }
+      if (task.status === "failed") {
+        throw new ApiError(422, "VIDEO_TASK_FAILED", task.errorMessage || "视频生成任务执行失败，请调整素材或参数后新建任务。");
+      }
+      if (task.status === "cancelled") {
+        throw new ApiError(409, "VIDEO_TASK_CANCELLED", "视频生成任务已由服务商取消，请新建任务后重试。");
+      }
+      if (task.status === "expired") {
+        throw new ApiError(410, "VIDEO_TASK_EXPIRED", "视频生成任务及结果已过期，请新建任务后重试。");
+      }
+      await updateGenerationProgress(db, generationId, leaseToken, "storage", 82);
+      generatedVideoStream = await openGeneratedVideoStream(task.videoUrl as string, fetch, leaseAbortController.signal);
+      generatedMimeType = generatedVideoStream.mimeType;
+      providerUsage = task.usage ?? null;
+    } else {
+      providerInvoked = true;
+      const generated = await generateImageWithModel(model, {
+        prompt: generation.prompt,
+        size: generation.size || undefined,
+        aspectRatio: generation.aspectRatio || undefined,
+        signal: leaseAbortController.signal,
+      });
+      generatedBytes = generated.bytes;
+      generatedMimeType = generated.mimeType;
+      generatedSize = generated.bytes.byteLength;
+      revisedPrompt = generated.revisedPrompt;
+      await updateGenerationProgress(db, generationId, leaseToken, "storage", 82);
+    }
 
     const assetId = id("ast");
-    const extension = generated.mimeType === "image/jpeg" ? "jpg" : generated.mimeType === "image/webp" ? "webp" : "png";
+    const extension = generatedMimeType === "video/quicktime"
+      ? "mov"
+      : generatedMimeType === "video/mp4"
+        ? "mp4"
+        : generatedMimeType === "image/jpeg"
+          ? "jpg"
+          : generatedMimeType === "image/webp"
+            ? "webp"
+            : "png";
     const storageKey = `projects/${projectId}/${assetId}/${safeFilename(generation.name)}.${extension}`;
-    await setGenerationStorageKey(db, generationId, leaseToken, storageKey);
     try {
-      await bucket.put(storageKey, generated.bytes, {
-        httpMetadata: { contentType: generated.mimeType },
-        customMetadata: { projectId, assetId, generatedByModelId: generation.modelId || "unknown", generationId },
-      });
+      await setGenerationStorageKey(db, generationId, leaseToken, storageKey);
     } catch (error) {
-      console.error("Generated image R2 write failed", { projectId, generationId, assetId, error });
-      throw new ApiError(503, "IMAGE_STORAGE_FAILED", "图片已经生成，但媒体存储暂时不可用，未能写入资产库。请稍后重试。");
+      await generatedVideoStream?.body.cancel(error).catch(() => undefined);
+      throw error;
+    }
+    try {
+      const putOptions = {
+        httpMetadata: { contentType: generatedMimeType },
+        customMetadata: { projectId, assetId, generatedByModelId: generation.modelId || "unknown", generationId },
+      };
+      if (generatedVideoStream) {
+        const [, completed] = await Promise.all([
+          bucket.put(storageKey, generatedVideoStream.body, putOptions),
+          generatedVideoStream.completed,
+        ]);
+        generatedSize = completed.size;
+      } else {
+        await bucket.put(storageKey, generatedBytes as Uint8Array, putOptions);
+      }
+    } catch (error) {
+      await generatedVideoStream?.body.cancel(error).catch(() => undefined);
+      if (error instanceof ApiError) throw error;
+      console.error("Generated media R2 write failed", { projectId, generationId, assetId, mediaType: generation.mediaType, error });
+      throw new ApiError(
+        503,
+        generation.mediaType === "video" ? "VIDEO_STORAGE_FAILED" : "IMAGE_STORAGE_FAILED",
+        `${generation.mediaType === "video" ? "视频" : "图片"}已经生成，但媒体存储暂时不可用，未能写入资产库。请稍后重试。`,
+      );
     }
 
     try {
@@ -174,20 +291,21 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
         db.prepare(`INSERT INTO assets (
           id, project_id, name, media_type, category, description, mime_type, size_bytes,
           storage_key, source_url, thumbnail_url, metadata_json, status, created_at, updated_at
-        ) SELECT ?, ?, ?, 'image', ?, ?, ?, ?, ?, NULL, NULL, ?, 'ready', ?, ?
+        ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, 'ready', ?, ?
           WHERE EXISTS (SELECT 1 FROM asset_generation_jobs
             WHERE id = ? AND status = 'running' AND lease_token = ?)`).bind(
-          assetId, projectId, generation.name, generation.category, generation.prompt,
-          generated.mimeType, generated.bytes.byteLength, storageKey,
+          assetId, projectId, generation.name, generation.mediaType, generation.category, generation.prompt,
+          generatedMimeType, generatedSize, storageKey,
           jsonText({ source: "ai-generation", generationId, modelId: generation.modelId, prompt: generation.prompt,
-            size: generation.size, aspectRatio: generation.aspectRatio, revisedPrompt: generated.revisedPrompt }, {}),
+            mediaType: generation.mediaType, size: generation.size, aspectRatio: generation.aspectRatio,
+            options: generation.options, revisedPrompt, providerTaskId: resolvedProviderTaskId, usage: providerUsage }, {}),
           completedAt, completedAt, generationId, leaseToken,
         ),
         ...relationStatements,
         db.prepare(`UPDATE asset_generation_jobs SET
           status = 'succeeded', phase = 'completed', progress = 100, asset_id = ?,
           lease_token = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL,
-          updated_at = ?, completed_at = ?
+          next_poll_at = NULL, updated_at = ?, completed_at = ?
           WHERE id = ? AND status = 'running' AND lease_token = ?`)
           .bind(assetId, completedAt, completedAt, generationId, leaseToken),
         db.prepare(`UPDATE projects SET updated_at = ? WHERE id = ?`).bind(completedAt, projectId),
@@ -198,15 +316,16 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
         throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期，当前结果不会写入资产库。");
       }
     } catch (error) {
-      try {
-        await bucket.delete(storageKey);
-        await setGenerationStorageKey(db, generationId, leaseToken, null);
-      } catch (cleanupError) {
-        console.error("Generated image cleanup failed", { projectId, generationId, assetId, cleanupError });
-      }
+      // Keep the object and storage_key until the job state is known. A D1 batch can
+      // commit and still lose its response; deleting here could leave a succeeded
+      // asset pointing at a missing R2 object. Failed jobs clean this key on retry or dismissal.
       if (error instanceof ApiError) throw error;
-      console.error("Generated image database finalization failed", { projectId, generationId, assetId, error });
-      throw new ApiError(503, "IMAGE_ASSET_FINALIZE_FAILED", "图片已经生成，但保存资产记录失败，媒体文件已清理。请稍后重试。");
+      console.error("Generated media database finalization failed", { projectId, generationId, assetId, mediaType: generation.mediaType, error });
+      throw new ApiError(
+        503,
+        generation.mediaType === "video" ? "VIDEO_ASSET_FINALIZE_FAILED" : "IMAGE_ASSET_FINALIZE_FAILED",
+        `${generation.mediaType === "video" ? "视频" : "图片"}已经生成，但保存资产记录的结果暂时无法确认。系统已保留媒体文件供安全恢复。`,
+      );
     }
 
     // Avoid a post-commit relation query here: the previous synchronous route could save the
@@ -216,7 +335,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     return ok({ generation: { id: generationId, status: "succeeded", phase: "completed", progress: 100, assetId } });
   } catch (error) {
     if (leaseHeartbeat) clearInterval(leaseHeartbeat);
-    const failure = generationFailure(error, providerInvoked);
+    const failure = generationFailure(error, providerInvoked, generationMediaType);
     if (db && generationId && leaseToken) {
       try {
         await persistGenerationFailure(db, generationId, leaseToken, failure);

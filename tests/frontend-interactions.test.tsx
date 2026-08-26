@@ -217,7 +217,7 @@ describe("关键按钮点击回归", () => {
     await user.click(await screen.findByRole("button", { name: "AI 创建资产" }));
 
     expect(screen.getByRole("dialog", { name: "AI 创建资产" })).toBeVisible();
-    expect(screen.getByRole("combobox", { name: /图像模型/ })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: /生成模型/ })).toBeVisible();
     expect(screen.getByRole("textbox", { name: /生成提示词/ })).toBeVisible();
   });
 });

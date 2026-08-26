@@ -167,6 +167,23 @@ export function chatCompletionsEndpoint(value: string): string {
   return url.toString();
 }
 
+export function modelSupportsTextAgent(model: Record<string, unknown>): boolean {
+  const rawParameters = model.parameters_json ?? model.parametersJson ?? model.parameters;
+  const configured = rawParameters && typeof rawParameters === "object" && !Array.isArray(rawParameters)
+    ? rawParameters as Record<string, unknown>
+    : parseJson<Record<string, unknown>>(rawParameters, {});
+  const capabilities = Array.isArray(configured.capabilities)
+    ? configured.capabilities.map((value) => String(value).trim().toLowerCase())
+    : [];
+  const textCapability = capabilities.some((value) => /^(?:text|analysis|chat|chat-completions|text-analysis|text-generation|文本|文本分析|文本生成|剧本创作)$/.test(value));
+  const videoCapability = capabilities.some((value) => /^(?:video|video-generation|video_generation|text-to-video|image-to-video|视频|视频生成|图生视频)$/.test(value));
+  if (textCapability) return true;
+  if (videoCapability) return false;
+  return !/seedance|text[-_ ]?to[-_ ]?video|video[-_ ]?(?:gen|generation)|视频生成|图生视频/i.test(
+    `${String(model.provider ?? "")} ${String(model.name ?? "")} ${String(model.model_id ?? model.modelId ?? "")}`,
+  );
+}
+
 export async function callConfiguredModel(
   model: Record<string, unknown>,
   prompt: string,
@@ -175,6 +192,7 @@ export async function callConfiguredModel(
 ): Promise<{ response: string; usage: Record<string, unknown>; requestMeta: Record<string, unknown> }> {
   if (!model.enabled) throw new ApiError(400, "MODEL_DISABLED", "所选模型已停用。 ");
   if (!model.api_key_ciphertext || !model.api_key_iv) throw new ApiError(400, "MODEL_API_KEY_MISSING", "请先为所选模型配置 API Key。 ");
+  if (!modelSupportsTextAgent(model)) throw new ApiError(400, "MODEL_TEXT_UNSUPPORTED", "所选模型仅支持视频生成，不能用于文本 Agent。 ");
   const configuredEndpoint = await validateModelEndpoint(String(model.endpoint));
   const endpoint = await validateModelEndpoint(chatCompletionsEndpoint(configuredEndpoint));
   let apiKey: string;
