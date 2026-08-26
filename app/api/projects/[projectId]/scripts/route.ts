@@ -23,7 +23,15 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
       const episode = await db.prepare(`SELECT id FROM episodes WHERE id = ? AND project_id = ?`).bind(episodeId, projectId).first();
       if (!episode) throw new ApiError(400, "INVALID_EPISODE", "所选分集不属于当前项目。 ");
     }
-    const version = optionalInteger(body, "version", 1, 10_000) ?? 1;
+    let version = optionalInteger(body, "version", 1, 10_000);
+    if (version === undefined) {
+      if (episodeId) {
+        const latest = await db.prepare(`SELECT COALESCE(MAX(version), 0) AS value FROM scripts WHERE project_id = ? AND episode_id = ?`).bind(projectId, episodeId).first<{ value: number }>();
+        version = Number(latest?.value ?? 0) + 1;
+      } else {
+        version = 1;
+      }
+    }
     const status = optionalString(body, "status", { max: 40 }) || "draft";
     const bodyText = optionalString(body, "bodyText", { max: 500_000 }) || "";
     const scriptId = id("scr"); const now = nowIso();

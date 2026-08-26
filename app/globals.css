@@ -1010,6 +1010,7 @@ button:disabled {
 .paper-toolbar > span, .paper-toolbar > div, .paper-toolbar button { display: flex; align-items: center; gap: 6px; }
 .paper-toolbar > div { gap: 6px; }
 .paper-toolbar button { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; font-size: 9px; background: var(--panel); }
+.paper-toolbar button.danger-button { color: var(--danger); }
 .screenplay { max-width: 620px; margin: 0 auto; padding: 56px 50px; font-family: "Noto Serif SC", "Songti SC", serif; }
 .scene-heading-line { font-weight: 800; letter-spacing: .05em; }
 .action-line { margin: 32px 0; font-size: 13px; line-height: 1.95; }
@@ -1812,6 +1813,14 @@ button:disabled {
   background: #edf7f1;
 }
 
+.inline-message.error-message {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--danger);
+  background: #fff0ed;
+}
+
 .story-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1924,8 +1933,13 @@ button:disabled {
 .script-create-toolbar { flex-wrap: wrap; }
 .script-empty-state .primary-button { width: max-content; margin-top: 12px; }
 .script-create-modal { width: min(680px, 100%); }
+.episode-create-modal { width: min(680px, 100%); }
 .script-create-modal fieldset.modal-fields { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
+.episode-create-modal fieldset.modal-fields { min-inline-size: 0; margin: 0; padding: 20px 22px; border: 0; }
 .script-create-modal .modal-fields textarea { min-height: 220px; resize: vertical; line-height: 1.65; }
+.field-hint { color: var(--muted); font-size: 8px; line-height: 1.55; }
+.field-hint-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.field-hint-row .text-button { min-height: 24px; flex: 0 0 auto; padding: 0 8px; font-size: 8px; }
 
 .modal-backdrop {
   position: fixed;

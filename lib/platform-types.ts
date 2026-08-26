@@ -158,9 +158,12 @@ export type ScriptScene = {
 export type ProjectScript = {
   id: string;
   projectId: string;
+  episodeId?: string | null;
   title: string;
   episodeNumber?: number | null;
+  version?: number | null;
   status?: string | null;
+  bodyText?: string | null;
   content?: string | null;
   scenes: ScriptScene[];
   [key: string]: unknown;

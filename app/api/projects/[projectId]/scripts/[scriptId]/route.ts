@@ -11,8 +11,12 @@ export async function PATCH(request: Request, context: RouteContext<{ projectId:
     if (!exists) throw new ApiError(404, "SCRIPT_NOT_FOUND", "剧本不存在。 ");
     const body = await readJsonObject(request); const updates: string[] = []; const values: unknown[] = [];
     for (const [field, column, max, nullable] of [["title", "title", 200, false], ["status", "status", 40, false], ["bodyText", "body_text", 500_000, false], ["episodeId", "episode_id", 100, true]] as const) {
-      const value = optionalString(body, field, { max, nullable });
+      let value = optionalString(body, field, { max, nullable });
       if (value !== undefined) {
+        if ((field === "title" || field === "status") && value === "") {
+          throw new ApiError(400, "VALIDATION_ERROR", `${field} 不能为空。`, { field });
+        }
+        if (field === "episodeId" && value === "") value = null;
         if (field === "episodeId" && value) {
           const episode = await db.prepare(`SELECT id FROM episodes WHERE id = ? AND project_id = ?`).bind(value, projectId).first();
           if (!episode) throw new ApiError(400, "INVALID_EPISODE", "所选分集不属于当前项目。 ");
