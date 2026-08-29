@@ -12,6 +12,8 @@ const FORBIDDEN_HOSTS = new Set([
 export async function validateModelEndpoint(value: string): Promise<string> {
   const localEndpoint = localDevelopmentModelEndpoint(value);
   if (localEndpoint) return localEndpoint;
+  const allowlistedHttpEndpoint = allowlistedPublicHttpModelEndpoint(value);
+  if (allowlistedHttpEndpoint) return allowlistedHttpEndpoint;
   return validatePublicHttpsUrl(value, { allowQuery: false, purpose: "模型地址" });
 }
 
@@ -39,6 +41,51 @@ export function localDevelopmentModelEndpoint(value: string): string | null {
   }
 
   return url.toString();
+}
+
+export function allowlistedPublicHttpModelEndpoint(value: string): string | null {
+  const allowedAuthorities = new Set(
+    (bindings()?.MODEL_HTTP_ENDPOINT_ALLOWLIST ?? "")
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .map((item) => {
+        const match = item.match(/^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/);
+        if (!match) return null;
+        const port = Number(match[2]);
+        return port >= 1 && port <= 65_535 ? `${match[1]}:${port}` : null;
+      })
+      .filter((item): item is string => item !== null),
+  );
+  if (allowedAuthorities.size === 0) return null;
+
+  const explicitAuthority = value.match(/^http:\/\/(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})(?:[/?#]|$)/i);
+  if (!explicitAuthority) return null;
+  const requestedPort = Number(explicitAuthority[2]);
+  if (requestedPort < 1 || requestedPort > 65_535) return null;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (
+    url.protocol !== "http:"
+    || !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)
+    || hostname !== explicitAuthority[1]
+    || !isPublicIp(hostname)
+    || !allowedAuthorities.has(`${hostname}:${requestedPort}`)
+    || url.username
+    || url.password
+    || url.hash
+    || url.search
+  ) {
+    return null;
+  }
+
+  return `http://${hostname}:${requestedPort}${url.pathname}`;
 }
 
 export async function validatePublicHttpsUrl(

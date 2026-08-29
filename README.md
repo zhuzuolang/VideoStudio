@@ -26,6 +26,8 @@ Sites 私有站点会注入当前登录用户身份。直接请求本地 API 时
 
 本地开发连接回环模型服务时，可在 `.dev.vars` 设置 `ALLOW_LOCAL_MODEL_ENDPOINTS=true`。该开关只放行 `localhost`、`127.0.0.1` 与 `::1`，不要配置到部署环境；Sites 云端也无法访问开发电脑上的回环地址。
 
+必须连接尚未提供 HTTPS 的公网模型服务时，可用 `MODEL_HTTP_ENDPOINT_ALLOWLIST` 明确列出允许的公网 IPv4 与端口（多个值用逗号分隔）。该例外不会放行私网、回环地址或其他主机；HTTP 会明文传输 API Key，应优先为模型服务配置 HTTPS。
+
 发布前可运行：
 
 ```bash

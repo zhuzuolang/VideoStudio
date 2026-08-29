@@ -194,7 +194,7 @@ describe("关键按钮点击回归", () => {
     expect(screen.getByRole("textbox", { name: /显示名称/ })).toBeVisible();
   });
 
-  test("ModelCenter 本地开发表单接受严格回环 HTTP 模型地址", async () => {
+  test("ModelCenter 表单接受由服务端允许的公网 HTTP 模型地址", async () => {
     let savedBody: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "POST") {
@@ -212,12 +212,12 @@ describe("关键按钮点击回归", () => {
     await user.type(within(dialog).getByRole("textbox", { name: /显示名称/ }), "gpt-5.4");
     await user.type(within(dialog).getByRole("textbox", { name: /服务商/ }), "OpenAI-compatible");
     await user.type(within(dialog).getByRole("textbox", { name: /模型 ID/ }), "gpt-5.4");
-    await user.type(within(dialog).getByRole("textbox", { name: /API 地址/ }), "http://127.0.0.1:8317/v1");
+    await user.type(within(dialog).getByRole("textbox", { name: /API 地址/ }), "http://8.163.6.244:8317/v1");
     await user.type(within(dialog).getByLabelText("API Key"), "test-local-key");
     await user.click(within(dialog).getByRole("button", { name: "保存模型" }));
 
     await waitFor(() => expect(savedBody).not.toBeNull());
-    expect(savedBody).toMatchObject({ endpoint: "http://127.0.0.1:8317/v1", modelId: "gpt-5.4" });
+    expect(savedBody).toMatchObject({ endpoint: "http://8.163.6.244:8317/v1", modelId: "gpt-5.4" });
   });
 
   test("AssetManager 点击“新增资产”显示资产 dialog", async () => {

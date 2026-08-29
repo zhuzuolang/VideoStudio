@@ -118,14 +118,10 @@ function parseCapabilities(value: string): string[] {
   );
 }
 
-function validateUrl(value: string, allowLoopbackHttp = false): boolean {
+function validateUrl(value: string, allowHttp = false): boolean {
   try {
     const url = new URL(value);
-    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-    const loopbackHttp = allowLoopbackHttp
-      && url.protocol === "http:"
-      && ["127.0.0.1", "localhost", "::1"].includes(hostname);
-    return (url.protocol === "https:" || loopbackHttp)
+    return (url.protocol === "https:" || (allowHttp && url.protocol === "http:"))
       && !url.username
       && !url.password
       && !url.hash
@@ -276,7 +272,7 @@ export default function ModelCenter({ className, refreshKey, onModelsChange }: M
     if (!form.modelId.trim()) nextErrors.modelId = "请输入服务商提供的模型 ID。";
     if (!form.level.trim()) nextErrors.level = "请输入模型等级。";
     if (!form.endpoint.trim()) nextErrors.endpoint = "请输入 API 地址。";
-    else if (!validateUrl(form.endpoint.trim(), true)) nextErrors.endpoint = "请输入有效且不含凭据的 HTTPS 地址；本地开发可使用 localhost 或 127.0.0.1。";
+    else if (!validateUrl(form.endpoint.trim(), true)) nextErrors.endpoint = "请输入有效且不含凭据的模型地址；HTTP 地址必须由服务端明确允许。";
     if (form.iconUrl.trim() && !validateUrl(form.iconUrl.trim())) nextErrors.iconUrl = "图标地址必须是有效且不含凭据的 HTTPS 地址。";
     if (parseCapabilities(form.capabilities).length === 0) nextErrors.capabilities = "请至少填写一项能力。";
     return nextErrors;

@@ -6,6 +6,7 @@ export type RuntimeBindings = {
   MEDIA?: R2Bucket;
   MODEL_KEY_ENCRYPTION_SECRET?: string;
   ALLOW_LOCAL_MODEL_ENDPOINTS?: string;
+  MODEL_HTTP_ENDPOINT_ALLOWLIST?: string;
 };
 
 export function bindings(): RuntimeBindings {

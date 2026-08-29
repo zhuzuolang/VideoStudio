@@ -31,6 +31,34 @@ describe("OpenAI-compatible 模型路径归一化", () => {
     await expect(validateModelEndpoint("http://127.0.0.1:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
   });
 
+  test("公网 HTTP 模型端点只允许显式配置的公共 IPv4 与端口", async () => {
+    vi.mocked(bindings).mockReturnValue({ MODEL_HTTP_ENDPOINT_ALLOWLIST: "8.163.6.244:8317" });
+
+    await expect(validateModelEndpoint("http://8.163.6.244:8317/v1")).resolves.toBe("http://8.163.6.244:8317/v1");
+    await expect(validateModelEndpoint("http://8.163.6.244:8317/v1/chat/completions")).resolves.toBe("http://8.163.6.244:8317/v1/chat/completions");
+    await expect(validateModelEndpoint("http://8.163.6.244:8318/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+    await expect(validateModelEndpoint("http://8.163.6.245:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+    await expect(validateModelEndpoint("http://8.163.6.244/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+    await expect(validateModelEndpoint("http://8.163.6.244:8317/v1?token=unsafe")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+  });
+
+  test("公网 HTTP 允许列表不能放行私网或回环地址", async () => {
+    vi.mocked(bindings).mockReturnValue({
+      MODEL_HTTP_ENDPOINT_ALLOWLIST: "127.0.0.1:8317,192.168.1.8:8317",
+    });
+
+    await expect(validateModelEndpoint("http://127.0.0.1:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+    await expect(validateModelEndpoint("http://192.168.1.8:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+  });
+
+  test("公网 HTTP 允许列表支持显式默认端口且拒绝非法端口", async () => {
+    vi.mocked(bindings).mockReturnValue({ MODEL_HTTP_ENDPOINT_ALLOWLIST: "8.163.6.244:80,8.163.6.244:0,8.163.6.244:65536" });
+
+    await expect(validateModelEndpoint("http://8.163.6.244:80/v1")).resolves.toBe("http://8.163.6.244:80/v1");
+    await expect(validateModelEndpoint("http://8.163.6.244/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+    await expect(validateModelEndpoint("http://8.163.6.244:0/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+  });
+
   test("纯图像生成模型不会被识别为文本 Agent", () => {
     const parameters_json = JSON.stringify({ capabilities: ["image-generation", "text-to-image"] });
     expect(modelSupportsTextAgent({ model_id: "gpt-image-2", parameters_json })).toBe(false);

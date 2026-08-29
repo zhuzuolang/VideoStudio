@@ -2,3 +2,5 @@
 MODEL_KEY_ENCRYPTION_SECRET=replace-with-a-long-random-secret
 # Local development only. Never enable this on a deployed Site.
 ALLOW_LOCAL_MODEL_ENDPOINTS=true
+# Comma-separated exact public IPv4 host:port entries. HTTP sends API keys without transport encryption.
+MODEL_HTTP_ENDPOINT_ALLOWLIST=
