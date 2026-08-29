@@ -29,6 +29,7 @@ interface R2Object {
   size: number;
   httpEtag: string;
   httpMetadata?: { contentType?: string };
+  customMetadata?: Record<string, string>;
 }
 
 interface R2ObjectBody extends R2Object {
@@ -38,12 +39,32 @@ interface R2ObjectBody extends R2Object {
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 
+interface R2WriteOptions {
+  httpMetadata?: { contentType?: string };
+  customMetadata?: Record<string, string>;
+}
+
+interface R2UploadedPart {
+  partNumber: number;
+  etag: string;
+}
+
+interface R2MultipartUpload {
+  uploadPart(
+    partNumber: number,
+    value: ReadableStream | ArrayBuffer | ArrayBufferView | string | Blob,
+  ): Promise<R2UploadedPart>;
+  complete(uploadedParts: R2UploadedPart[]): Promise<R2Object>;
+  abort(): Promise<void>;
+}
+
 interface R2Bucket {
   put(
     key: string,
     value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null,
-    options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> },
+    options?: R2WriteOptions,
   ): Promise<unknown>;
+  createMultipartUpload(key: string, options?: R2WriteOptions): Promise<R2MultipartUpload>;
   head(key: string): Promise<R2Object | null>;
   get(key: string, options?: { range?: { offset: number; length: number } | Headers }): Promise<R2ObjectBody | null>;
   delete(keys: string | string[]): Promise<void>;

@@ -13,7 +13,7 @@ export const MAX_GENERATED_VIDEO_BYTES = 100 * 1024 * 1024;
 const TASK_CREATE_REQUEST_TIMEOUT_MS = 35_000;
 const TASK_STATUS_REQUEST_TIMEOUT_MS = 30_000;
 const CONNECTION_TEST_TIMEOUT_MS = 30_000;
-const VIDEO_DOWNLOAD_TIMEOUT_MS = 60_000;
+const VIDEO_DOWNLOAD_CONNECT_TIMEOUT_MS = 60_000;
 const MAX_VIDEO_REDIRECTS = 3;
 const MAX_REFERENCE_IMAGE_BYTES = 30 * 1024 * 1024;
 
@@ -73,6 +73,7 @@ export type GeneratedVideoStream = {
   body: ReadableStream<Uint8Array>;
   mimeType: "video/mp4" | "video/quicktime";
   sourceUrl: string;
+  expectedSize: number | null;
   completed: Promise<{ size: number }>;
 };
 
@@ -431,10 +432,12 @@ export async function openGeneratedVideoStream(
   externalSignal?: AbortSignal,
 ): Promise<GeneratedVideoStream> {
   const { response, sourceUrl } = await fetchGeneratedVideoResponse(initialUrl, fetchImpl, externalSignal);
+  const expectedSize = reliableResponseBodySize(response);
   if (!response.body) throw new ApiError(502, "INVALID_VIDEO_BYTES", "生成结果没有可读取的视频内容。");
   const reader = response.body.getReader();
-  const prefixChunks: Uint8Array[] = [];
+  const prefix = new Uint8Array(12);
   let prefixSize = 0;
+  let pendingChunk: Uint8Array | null = null;
   let sourceEnded = false;
   try {
     while (prefixSize < 12) {
@@ -443,12 +446,18 @@ export async function openGeneratedVideoStream(
         sourceEnded = true;
         break;
       }
-      prefixSize += value.byteLength;
-      if (prefixSize > MAX_GENERATED_VIDEO_BYTES) {
+      if (expectedSize !== null && prefixSize + value.byteLength > expectedSize) {
+        await reader.cancel();
+        throw new ApiError(502, "VIDEO_RESPONSE_SIZE_MISMATCH", "视频下载结果超过服务器声明的大小，请继续处理重试。");
+      }
+      if (prefixSize + value.byteLength > MAX_GENERATED_VIDEO_BYTES) {
         await reader.cancel();
         throw new ApiError(502, "VIDEO_RESPONSE_TOO_LARGE", "生成视频超过 100 MB 大小限制。");
       }
-      prefixChunks.push(value);
+      const copied = Math.min(12 - prefixSize, value.byteLength);
+      prefix.set(value.subarray(0, copied), prefixSize);
+      prefixSize += copied;
+      if (copied < value.byteLength) pendingChunk = value.subarray(copied);
     }
   } catch (error) {
     try {
@@ -463,10 +472,9 @@ export async function openGeneratedVideoStream(
     }
     throw new ApiError(502, "VIDEO_RESPONSE_STREAM_FAILED", "生成视频读取中断，请稍后重试。");
   }
-  const prefix = joinBytes(prefixChunks, prefixSize);
   let mimeType: "video/mp4" | "video/quicktime";
   try {
-    mimeType = sniffVideoType(prefix);
+    mimeType = sniffVideoType(prefix.subarray(0, prefixSize));
   } catch (error) {
     await reader.cancel();
     reader.releaseLock();
@@ -479,7 +487,7 @@ export async function openGeneratedVideoStream(
     resolveCompleted = resolve;
     rejectCompleted = reject;
   });
-  let transferred = prefix.byteLength;
+  let transferred = prefixSize + (pendingChunk?.byteLength ?? 0);
   let settled = false;
   const finish = () => {
     if (settled) return;
@@ -494,7 +502,11 @@ export async function openGeneratedVideoStream(
   };
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(prefix);
+      controller.enqueue(prefix.subarray(0, prefixSize));
+      if (pendingChunk) {
+        controller.enqueue(pendingChunk);
+        pendingChunk = null;
+      }
       if (sourceEnded) {
         controller.close();
         finish();
@@ -504,11 +516,27 @@ export async function openGeneratedVideoStream(
       try {
         const { done, value } = await reader.read();
         if (done) {
+          if (expectedSize !== null && transferred !== expectedSize) {
+            const error = new ApiError(502, "VIDEO_RESPONSE_SIZE_MISMATCH", "视频下载结果少于服务器声明的大小，请继续处理重试。");
+            reader.releaseLock();
+            controller.error(error);
+            fail(error);
+            return;
+          }
           controller.close();
           finish();
           return;
         }
-        transferred += value.byteLength;
+        const nextTransferred = transferred + value.byteLength;
+        if (expectedSize !== null && nextTransferred > expectedSize) {
+          const error = new ApiError(502, "VIDEO_RESPONSE_SIZE_MISMATCH", "视频下载结果超过服务器声明的大小，请继续处理重试。");
+          await reader.cancel(error);
+          reader.releaseLock();
+          controller.error(error);
+          fail(error);
+          return;
+        }
+        transferred = nextTransferred;
         if (transferred > MAX_GENERATED_VIDEO_BYTES) {
           const error = new ApiError(502, "VIDEO_RESPONSE_TOO_LARGE", "生成视频超过 100 MB 大小限制。");
           await reader.cancel(error);
@@ -543,7 +571,16 @@ export async function openGeneratedVideoStream(
       }
     },
   });
-  return { body, mimeType, sourceUrl, completed };
+  return { body, mimeType, sourceUrl, expectedSize, completed };
+}
+
+function reliableResponseBodySize(response: Response): number | null {
+  const contentEncoding = response.headers.get("content-encoding")?.trim().toLowerCase();
+  if (contentEncoding && contentEncoding !== "identity") return null;
+  const contentLength = response.headers.get("content-length")?.trim();
+  if (!contentLength || !/^\d+$/.test(contentLength)) return null;
+  const size = Number(contentLength);
+  return Number.isSafeInteger(size) && size >= 0 ? size : null;
 }
 
 async function fetchGeneratedVideoResponse(
@@ -557,19 +594,25 @@ async function fetchGeneratedVideoResponse(
   let currentUrl = await validatePublicHttpsUrl(initialUrl, { allowQuery: true, purpose: "生成视频地址" });
   for (let redirectCount = 0; redirectCount <= MAX_VIDEO_REDIRECTS; redirectCount += 1) {
     let response: Response;
+    const connectionController = new AbortController();
+    const connectionTimer = setTimeout(() => {
+      connectionController.abort(new DOMException("Video download connection timed out", "TimeoutError"));
+    }, VIDEO_DOWNLOAD_CONNECT_TIMEOUT_MS);
     try {
       response = await fetchImpl(currentUrl, {
         method: "GET",
         redirect: "manual",
         signal: externalSignal
-          ? AbortSignal.any([externalSignal, AbortSignal.timeout(VIDEO_DOWNLOAD_TIMEOUT_MS)])
-          : AbortSignal.timeout(VIDEO_DOWNLOAD_TIMEOUT_MS),
+          ? AbortSignal.any([externalSignal, connectionController.signal])
+          : connectionController.signal,
       });
     } catch {
       if (externalSignal?.aborted) {
         throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期，已停止下载视频结果。");
       }
       throw new ApiError(502, "VIDEO_DOWNLOAD_FAILED", "视频已生成，但下载结果时连接中断。");
+    } finally {
+      clearTimeout(connectionTimer);
     }
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
@@ -610,16 +653,6 @@ async function fetchGeneratedVideoResponse(
     return { response, sourceUrl: currentUrl };
   }
   throw new ApiError(502, "VIDEO_DOWNLOAD_REDIRECT_REJECTED", "视频下载重定向未完成。");
-}
-
-function joinBytes(chunks: Uint8Array[], total: number): Uint8Array {
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
 }
 
 function collectReferenceImages(input: VideoGenerationInput): Array<{ url: string; role: VideoReferenceImageRole }> {

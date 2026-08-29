@@ -546,14 +546,105 @@ describe("视频结果安全下载", () => {
       },
     }), {
       status: 200,
-      headers: { "content-type": "video/mp4" },
+      headers: { "content-type": "video/mp4", "content-length": String(mp4.byteLength + tail.byteLength) },
     })) as unknown as typeof fetch;
 
     const opened = await openGeneratedVideoStream("https://cdn.example.com/video.mp4", fetchImpl);
     expect(opened.mimeType).toBe("video/mp4");
+    expect(opened.expectedSize).toBe(mp4.byteLength + tail.byteLength);
     const bytes = new Uint8Array(await new Response(opened.body).arrayBuffer());
     await expect(opened.completed).resolves.toEqual({ size: mp4.byteLength + tail.byteLength });
     expect(bytes).toEqual(new Uint8Array([...mp4, ...tail]));
+  });
+
+  test("嗅探文件头时只复制 12 字节，不复制整个首个大数据块", async () => {
+    const firstChunk = new Uint8Array(1024 * 1024);
+    firstChunk.set(mp4);
+    const fetchImpl = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(firstChunk);
+        controller.close();
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "video/mp4", "content-length": String(firstChunk.byteLength) },
+    })) as unknown as typeof fetch;
+
+    const opened = await openGeneratedVideoStream("https://cdn.example.com/video.mp4", fetchImpl);
+    const reader = opened.body.getReader();
+    const prefix = await reader.read();
+    const remainder = await reader.read();
+    const end = await reader.read();
+    reader.releaseLock();
+
+    expect(prefix).toMatchObject({ done: false, value: mp4.subarray(0, 12) });
+    expect(remainder.done).toBe(false);
+    expect(remainder.value?.byteLength).toBe(firstChunk.byteLength - 12);
+    expect(end.done).toBe(true);
+    await expect(opened.completed).resolves.toEqual({ size: firstChunk.byteLength });
+  });
+
+  test("Content-Length 与实际视频大小不一致时返回稳定错误", async () => {
+    const tooShortFetch = vi.fn(async () => new Response(mp4, {
+      status: 200,
+      headers: { "content-type": "video/mp4", "content-length": String(mp4.byteLength - 1) },
+    })) as unknown as typeof fetch;
+    await expect(openGeneratedVideoStream(
+      "https://cdn.example.com/video.mp4",
+      tooShortFetch,
+    )).rejects.toMatchObject({ code: "VIDEO_RESPONSE_SIZE_MISMATCH" });
+
+    const tooLongFetch = vi.fn(async () => new Response(mp4, {
+      status: 200,
+      headers: { "content-type": "video/mp4", "content-length": String(mp4.byteLength + 1) },
+    })) as unknown as typeof fetch;
+    const opened = await openGeneratedVideoStream("https://cdn.example.com/video.mp4", tooLongFetch);
+    await expect(Promise.all([
+      new Response(opened.body).arrayBuffer(),
+      opened.completed,
+    ])).rejects.toMatchObject({ code: "VIDEO_RESPONSE_SIZE_MISMATCH" });
+  });
+
+  test("60 秒只限制下载建连，响应体持续传输不受总时长限制", async () => {
+    vi.useFakeTimers();
+    try {
+      let requestSignal: AbortSignal | null = null;
+      const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestSignal = init?.signal as AbortSignal;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(mp4);
+          },
+        }), {
+          status: 200,
+          headers: { "content-type": "video/mp4" },
+        });
+      }) as unknown as typeof fetch;
+      const opened = await openGeneratedVideoStream("https://cdn.example.com/video.mp4", fetchImpl);
+      const completion = opened.completed.catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(60_001);
+      const observedSignal = requestSignal as AbortSignal | null;
+      expect(observedSignal?.aborted).toBe(false);
+      await opened.body.cancel();
+      await completion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("压缩响应或缺少 Content-Length 时不把普通流误标为固定长度", async () => {
+    const headerCases: HeadersInit[] = [
+      { "content-type": "video/mp4" },
+      { "content-type": "video/mp4", "content-length": String(mp4.byteLength), "content-encoding": "gzip" },
+    ];
+    for (const headers of headerCases) {
+      const fetchImpl = vi.fn(async () => new Response(mp4, { status: 200, headers })) as unknown as typeof fetch;
+      const opened = await openGeneratedVideoStream("https://cdn.example.com/video.mp4", fetchImpl);
+      expect(opened.expectedSize).toBeNull();
+      await new Response(opened.body).arrayBuffer();
+      await expect(opened.completed).resolves.toEqual({ size: mp4.byteLength });
+    }
   });
 
   test("拒绝超大文件和伪装成视频的 HTML", async () => {

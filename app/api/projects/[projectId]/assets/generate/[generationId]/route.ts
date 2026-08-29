@@ -21,9 +21,11 @@ import {
   buildVideoGenerationRequest,
   createVideoGenerationTask,
   getVideoGenerationTask,
+  MAX_GENERATED_VIDEO_BYTES,
   openGeneratedVideoStream,
 } from "@/lib/server/video-generation";
 import { parseVideoReferenceAssets, resolveVideoReferenceAssets } from "@/lib/server/video-reference-assets";
+import { storeGeneratedVideoStream } from "@/lib/server/video-storage";
 
 export const dynamic = "force-dynamic";
 const LEASE_MS = 300_000;
@@ -47,6 +49,33 @@ const VIDEO_TASK_RESTART_CODES = new Set([
 
 function shouldContinueVideoTaskPolling(error: unknown): error is ApiError {
   return error instanceof ApiError && TRANSIENT_VIDEO_TASK_QUERY_CODES.has(error.code);
+}
+
+type StoredVideoCheckpoint = {
+  assetId: string;
+  storageKey: string;
+  mimeType: "video/mp4" | "video/quicktime";
+  size: number;
+};
+
+function reusableStoredVideo(
+  object: R2Object | null,
+  storageKey: string,
+  projectId: string,
+  generationId: string,
+): StoredVideoCheckpoint | null {
+  if (!object || !Number.isSafeInteger(object.size) || object.size <= 0 || object.size > MAX_GENERATED_VIDEO_BYTES) return null;
+  const prefix = `projects/${projectId}/`;
+  if (!storageKey.startsWith(prefix)) return null;
+  const [assetId, filename, ...extra] = storageKey.slice(prefix.length).split("/");
+  if (!assetId?.startsWith("ast_") || !filename || extra.length > 0) return null;
+  const mimeType = object.httpMetadata?.contentType;
+  if (mimeType !== "video/mp4" && mimeType !== "video/quicktime") return null;
+  const metadata = object.customMetadata;
+  if (metadata?.projectId !== projectId
+    || metadata.assetId !== assetId
+    || metadata.generationId !== generationId) return null;
+  return { assetId, storageKey, mimeType, size: object.size };
 }
 
 export async function GET(request: Request, context: RouteContext<{ projectId: string; generationId: string }>): Promise<Response> {
@@ -208,7 +237,6 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
       });
     }, LEASE_HEARTBEAT_MS);
 
-    const model = await requireOwnedModel(db, generation.modelId || "", identity.userId);
     await validateAssetRelationTargets(db, projectId, generation.relations);
     let bucket: R2Bucket;
     try {
@@ -218,164 +246,191 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
       throw new ApiError(503, "MEDIA_STORAGE_UNAVAILABLE", "媒体存储尚未配置或暂时不可用，生成模型尚未开始调用。");
     }
     const previousStorageKey = await getGenerationStorageKey(db, generationId, leaseToken);
+    let storedVideo: StoredVideoCheckpoint | null = null;
     if (previousStorageKey) {
       try {
-        await bucket.delete(previousStorageKey);
-        await setGenerationStorageKey(db, generationId, leaseToken, null);
+        storedVideo = generation.mediaType === "video"
+          ? reusableStoredVideo(
+              await bucket.head(previousStorageKey),
+              previousStorageKey,
+              projectId,
+              generationId,
+            )
+          : null;
+        if (!storedVideo) {
+          await bucket.delete(previousStorageKey);
+          await setGenerationStorageKey(db, generationId, leaseToken, null);
+        }
       } catch (error) {
-        console.error("Previous generation media cleanup failed", { projectId, generationId, previousStorageKey, error });
-        throw new ApiError(503, "GENERATION_CLEANUP_FAILED", "上一次尝试留下的媒体文件暂时无法清理，生成模型尚未重新调用。");
+        console.error("Previous generation media recovery failed", {
+          projectId,
+          generationId,
+          previousStorageKey,
+          errorName: error instanceof Error ? error.name : typeof error,
+          errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+        });
+        throw new ApiError(503, "GENERATION_CLEANUP_FAILED", "上一次尝试保留的媒体文件暂时无法核验或清理，生成模型尚未重新调用。");
       }
     }
     let generatedBytes: Uint8Array | null = null;
     let generatedVideoStream: Awaited<ReturnType<typeof openGeneratedVideoStream>> | null = null;
-    let generatedMimeType: string;
-    let generatedSize = 0;
+    let generatedMimeType: string = storedVideo?.mimeType ?? "";
+    let generatedSize = storedVideo?.size ?? 0;
     let revisedPrompt: string | null = null;
     let providerUsage: Record<string, unknown> | null = null;
     let resolvedProviderTaskId = restartProviderTask ? null : generation.providerTaskId ?? null;
+    let assetId = storedVideo?.assetId ?? "";
+    let storageKey = storedVideo?.storageKey ?? "";
 
-    if (generation.mediaType === "video") {
-      if (!resolvedProviderTaskId) {
-        const referenceImages = await resolveVideoReferenceAssets(
-          db,
-          bucket,
-          projectId,
-          parseVideoReferenceAssets(generation.options.referenceImages),
-          imageTransformationBinding(),
-        );
-        const videoInput = {
-          prompt: generation.prompt,
-          resolution: generation.options.resolution,
-          aspectRatio: generation.aspectRatio || undefined,
-          duration: generation.options.duration,
-          generateAudio: generation.options.generateAudio,
-          referenceImages,
-          referenceImageUrl: generation.options.referenceImageUrl,
-          referenceImageRole: generation.options.referenceImageRole,
-          signal: leaseAbortController.signal,
-        };
-        // Validate the model-specific profile before marking the call as potentially billable.
-        buildVideoGenerationRequest(model, videoInput);
-        const created = await createVideoGenerationTask(model, videoInput, fetch, {
-          beforeDispatch: async () => {
-            await markGenerationProviderSubmissionStarted(db as D1Database, generationId, leaseToken);
-            providerInvoked = true;
-          },
-        });
-        resolvedProviderTaskId = created.taskId;
-        await persistGenerationProviderTask(
-          db,
-          generationId,
-          leaseToken,
-          resolvedProviderTaskId,
-          VIDEO_POLL_AFTER_MS,
-        );
-        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
-        leaseHeartbeat = null;
-        leaseToken = "";
-        return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
-      }
+    if (!storedVideo) {
+      const model = await requireOwnedModel(db, generation.modelId || "", identity.userId);
+      if (generation.mediaType === "video") {
+        if (!resolvedProviderTaskId) {
+          const referenceImages = await resolveVideoReferenceAssets(
+            db,
+            bucket,
+            projectId,
+            parseVideoReferenceAssets(generation.options.referenceImages),
+            imageTransformationBinding(),
+          );
+          const videoInput = {
+            prompt: generation.prompt,
+            resolution: generation.options.resolution,
+            aspectRatio: generation.aspectRatio || undefined,
+            duration: generation.options.duration,
+            generateAudio: generation.options.generateAudio,
+            referenceImages,
+            referenceImageUrl: generation.options.referenceImageUrl,
+            referenceImageRole: generation.options.referenceImageRole,
+            signal: leaseAbortController.signal,
+          };
+          // Validate the model-specific profile before marking the call as potentially billable.
+          buildVideoGenerationRequest(model, videoInput);
+          const created = await createVideoGenerationTask(model, videoInput, fetch, {
+            beforeDispatch: async () => {
+              await markGenerationProviderSubmissionStarted(db as D1Database, generationId, leaseToken);
+              providerInvoked = true;
+            },
+          });
+          resolvedProviderTaskId = created.taskId;
+          await persistGenerationProviderTask(
+            db,
+            generationId,
+            leaseToken,
+            resolvedProviderTaskId,
+            VIDEO_POLL_AFTER_MS,
+          );
+          if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+          leaseHeartbeat = null;
+          leaseToken = "";
+          return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
+        }
 
-      let task: Awaited<ReturnType<typeof getVideoGenerationTask>>;
-      try {
-        task = await getVideoGenerationTask(model, resolvedProviderTaskId, fetch, leaseAbortController.signal);
-      } catch (error) {
-        if (!shouldContinueVideoTaskPolling(error)) throw error;
-        await releaseGenerationForPolling(
-          db,
-          generationId,
-          leaseToken,
-          Math.max(25, generation.progress),
-          VIDEO_POLL_RETRY_AFTER_MS,
-          {
-            code: "VIDEO_STATUS_SYNC_DELAYED",
-            message: "官方视频任务状态暂时未同步，系统会继续查询，不会停止生成。",
-          },
-        );
-        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
-        leaseHeartbeat = null;
-        leaseToken = "";
-        return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
-      }
-      if (task.status === "queued" || task.status === "running") {
-        const progress = task.status === "queued"
-          ? Math.max(35, generation.progress)
-          : Math.max(50, generation.progress);
-        await releaseGenerationForPolling(db, generationId, leaseToken, progress, VIDEO_POLL_AFTER_MS);
-        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
-        leaseHeartbeat = null;
-        leaseToken = "";
-        return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
-      }
-      if (task.status === "failed") {
-        throw new ApiError(422, "VIDEO_TASK_FAILED", task.errorMessage || "视频生成任务执行失败，请调整素材或参数后新建任务。");
-      }
-      if (task.status === "cancelled") {
-        throw new ApiError(409, "VIDEO_TASK_CANCELLED", "视频生成任务已由服务商取消，请新建任务后重试。");
-      }
-      if (task.status === "expired") {
-        throw new ApiError(410, "VIDEO_TASK_EXPIRED", "视频生成任务及结果已过期，请新建任务后重试。");
-      }
-      await updateGenerationProgress(db, generationId, leaseToken, "storage", 82);
-      generatedVideoStream = await openGeneratedVideoStream(task.videoUrl as string, fetch, leaseAbortController.signal);
-      generatedMimeType = generatedVideoStream.mimeType;
-      providerUsage = task.usage ?? null;
-    } else {
-      providerInvoked = true;
-      const generated = await generateImageWithModel(model, {
-        prompt: generation.prompt,
-        size: generation.size || undefined,
-        aspectRatio: generation.aspectRatio || undefined,
-        signal: leaseAbortController.signal,
-      });
-      generatedBytes = generated.bytes;
-      generatedMimeType = generated.mimeType;
-      generatedSize = generated.bytes.byteLength;
-      revisedPrompt = generated.revisedPrompt;
-      await updateGenerationProgress(db, generationId, leaseToken, "storage", 82);
-    }
-
-    const assetId = id("ast");
-    const extension = generatedMimeType === "video/quicktime"
-      ? "mov"
-      : generatedMimeType === "video/mp4"
-        ? "mp4"
-        : generatedMimeType === "image/jpeg"
-          ? "jpg"
-          : generatedMimeType === "image/webp"
-            ? "webp"
-            : "png";
-    const storageKey = `projects/${projectId}/${assetId}/${safeFilename(generation.name)}.${extension}`;
-    try {
-      await setGenerationStorageKey(db, generationId, leaseToken, storageKey);
-    } catch (error) {
-      await generatedVideoStream?.body.cancel(error).catch(() => undefined);
-      throw error;
-    }
-    try {
-      const putOptions = {
-        httpMetadata: { contentType: generatedMimeType },
-        customMetadata: { projectId, assetId, generatedByModelId: generation.modelId || "unknown", generationId },
-      };
-      if (generatedVideoStream) {
-        const [, completed] = await Promise.all([
-          bucket.put(storageKey, generatedVideoStream.body, putOptions),
-          generatedVideoStream.completed,
-        ]);
-        generatedSize = completed.size;
+        let task: Awaited<ReturnType<typeof getVideoGenerationTask>>;
+        try {
+          task = await getVideoGenerationTask(model, resolvedProviderTaskId, fetch, leaseAbortController.signal);
+        } catch (error) {
+          if (!shouldContinueVideoTaskPolling(error)) throw error;
+          await releaseGenerationForPolling(
+            db,
+            generationId,
+            leaseToken,
+            Math.max(25, generation.progress),
+            VIDEO_POLL_RETRY_AFTER_MS,
+            {
+              code: "VIDEO_STATUS_SYNC_DELAYED",
+              message: "官方视频任务状态暂时未同步，系统会继续查询，不会停止生成。",
+            },
+          );
+          if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+          leaseHeartbeat = null;
+          leaseToken = "";
+          return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
+        }
+        if (task.status === "queued" || task.status === "running") {
+          const progress = task.status === "queued"
+            ? Math.max(35, generation.progress)
+            : Math.max(50, generation.progress);
+          await releaseGenerationForPolling(db, generationId, leaseToken, progress, VIDEO_POLL_AFTER_MS);
+          if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+          leaseHeartbeat = null;
+          leaseToken = "";
+          return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
+        }
+        if (task.status === "failed") {
+          throw new ApiError(422, "VIDEO_TASK_FAILED", task.errorMessage || "视频生成任务执行失败，请调整素材或参数后新建任务。");
+        }
+        if (task.status === "cancelled") {
+          throw new ApiError(409, "VIDEO_TASK_CANCELLED", "视频生成任务已由服务商取消，请新建任务后重试。");
+        }
+        if (task.status === "expired") {
+          throw new ApiError(410, "VIDEO_TASK_EXPIRED", "视频生成任务及结果已过期，请新建任务后重试。");
+        }
+        await updateGenerationProgress(db, generationId, leaseToken, "storage", 82);
+        generatedVideoStream = await openGeneratedVideoStream(task.videoUrl as string, fetch, leaseAbortController.signal);
+        generatedMimeType = generatedVideoStream.mimeType;
+        providerUsage = task.usage ?? null;
       } else {
-        await bucket.put(storageKey, generatedBytes as Uint8Array, putOptions);
+        providerInvoked = true;
+        const generated = await generateImageWithModel(model, {
+          prompt: generation.prompt,
+          size: generation.size || undefined,
+          aspectRatio: generation.aspectRatio || undefined,
+          signal: leaseAbortController.signal,
+        });
+        generatedBytes = generated.bytes;
+        generatedMimeType = generated.mimeType;
+        generatedSize = generated.bytes.byteLength;
+        revisedPrompt = generated.revisedPrompt;
+        await updateGenerationProgress(db, generationId, leaseToken, "storage", 82);
       }
-    } catch (error) {
-      await generatedVideoStream?.body.cancel(error).catch(() => undefined);
-      if (error instanceof ApiError) throw error;
-      console.error("Generated media R2 write failed", { projectId, generationId, assetId, mediaType: generation.mediaType, error });
-      throw new ApiError(
-        503,
-        generation.mediaType === "video" ? "VIDEO_STORAGE_FAILED" : "IMAGE_STORAGE_FAILED",
-        `${generation.mediaType === "video" ? "视频" : "图片"}已经生成，但媒体存储暂时不可用，未能写入资产库。请稍后重试。`,
-      );
+    }
+
+    if (!storedVideo) {
+      assetId = id("ast");
+      const extension = generatedMimeType === "video/quicktime"
+        ? "mov"
+        : generatedMimeType === "video/mp4"
+          ? "mp4"
+          : generatedMimeType === "image/jpeg"
+            ? "jpg"
+            : generatedMimeType === "image/webp"
+              ? "webp"
+              : "png";
+      storageKey = `projects/${projectId}/${assetId}/${safeFilename(generation.name)}.${extension}`;
+      try {
+        await setGenerationStorageKey(db, generationId, leaseToken, storageKey);
+      } catch (error) {
+        await generatedVideoStream?.body.cancel(error).catch(() => undefined);
+        throw error;
+      }
+      try {
+        const putOptions = {
+          httpMetadata: { contentType: generatedMimeType },
+          customMetadata: { projectId, assetId, generatedByModelId: generation.modelId || "unknown", generationId },
+        };
+        if (generatedVideoStream) {
+          generatedSize = await storeGeneratedVideoStream(bucket, storageKey, generatedVideoStream, putOptions);
+        } else {
+          await bucket.put(storageKey, generatedBytes as Uint8Array, putOptions);
+        }
+      } catch (error) {
+        await generatedVideoStream?.body.cancel(error).catch(() => undefined);
+        if (error instanceof ApiError) throw error;
+        console.error("Generated media R2 write failed", {
+          projectId,
+          generationId,
+          assetId,
+          mediaType: generation.mediaType,
+          errorName: error instanceof Error ? error.name : typeof error,
+          errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+        });
+        throw new ApiError(
+          503,
+          generation.mediaType === "video" ? "VIDEO_STORAGE_FAILED" : "IMAGE_STORAGE_FAILED",
+          `${generation.mediaType === "video" ? "视频" : "图片"}已经生成，但媒体存储暂时不可用，未能写入资产库。请稍后重试。`,
+        );
+      }
     }
 
     try {
@@ -413,7 +468,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     } catch (error) {
       // Keep the object and storage_key until the job state is known. A D1 batch can
       // commit and still lose its response; deleting here could leave a succeeded
-      // asset pointing at a missing R2 object. Failed jobs clean this key on retry or dismissal.
+      // asset pointing at a missing R2 object. A retry verifies and reuses this object.
       if (error instanceof ApiError) throw error;
       console.error("Generated media database finalization failed", { projectId, generationId, assetId, mediaType: generation.mediaType, error });
       throw new ApiError(

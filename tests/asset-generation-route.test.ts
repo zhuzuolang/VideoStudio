@@ -3,6 +3,7 @@ import { ApiError } from "@/lib/server/api";
 
 const mocks = vi.hoisted(() => ({
   put: vi.fn(),
+  head: vi.fn(),
   delete: vi.fn(),
   generate: vi.fn(),
   supportsImages: vi.fn(() => true),
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createVideoTask: vi.fn(),
   getVideoTask: vi.fn(),
   downloadVideo: vi.fn(),
+  storeVideo: vi.fn(),
   prepareRelations: vi.fn(),
   validateRelations: vi.fn(),
   requireProject: vi.fn(),
@@ -65,7 +67,7 @@ vi.mock("@/lib/server/context", () => ({
   apiContext: vi.fn(async () => ({ db: fakeDb, identity: { userId: "user-1" } })),
 }));
 vi.mock("@/lib/server/runtime", () => ({
-  mediaBucket: () => ({ put: mocks.put, delete: mocks.delete }),
+  mediaBucket: () => ({ put: mocks.put, head: mocks.head, delete: mocks.delete }),
   imageTransformationBinding: () => undefined,
 }));
 vi.mock("@/lib/server/image-generation", () => ({
@@ -73,12 +75,16 @@ vi.mock("@/lib/server/image-generation", () => ({
   modelSupportsImageGeneration: mocks.supportsImages,
 }));
 vi.mock("@/lib/server/video-generation", () => ({
+  MAX_GENERATED_VIDEO_BYTES: 100 * 1024 * 1024,
   modelSupportsVideoGeneration: mocks.supportsVideos,
   seedanceRequestProfile: mocks.seedanceRequestProfile,
   buildVideoGenerationRequest: mocks.buildVideoRequest,
   createVideoGenerationTask: mocks.createVideoTask,
   getVideoGenerationTask: mocks.getVideoTask,
   openGeneratedVideoStream: mocks.downloadVideo,
+}));
+vi.mock("@/lib/server/video-storage", () => ({
+  storeGeneratedVideoStream: mocks.storeVideo,
 }));
 vi.mock("@/lib/server/video-reference-assets", () => ({
   parseVideoReferenceAssets: mocks.parseReferenceAssets,
@@ -152,6 +158,7 @@ beforeEach(() => {
   });
   mocks.getGeneration.mockResolvedValue(generation);
   mocks.getStorageKey.mockResolvedValue(null);
+  mocks.head.mockResolvedValue(null);
   mocks.generate.mockResolvedValue({
     bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
     mimeType: "image/png",
@@ -178,8 +185,10 @@ beforeEach(() => {
     }),
     mimeType: "video/mp4",
     sourceUrl: "https://cdn.example.test/generated.mp4?signature=hidden",
+    expectedSize: null,
     completed: Promise.resolve({ size: 12 }),
   });
+  mocks.storeVideo.mockResolvedValue(12);
   mocks.prepareRelations.mockReturnValue([{ sql: "INSERT relation", values: [] }]);
 });
 
@@ -678,11 +687,153 @@ test("成功视频下载到 R2，并作为 video 资产完成入库", async () =
     fetch,
     expect.any(AbortSignal),
   );
-  expect(mocks.put).toHaveBeenCalledWith(
+  expect(mocks.storeVideo).toHaveBeenCalledWith(
+    expect.objectContaining({ put: mocks.put, head: mocks.head }),
     expect.stringMatching(/\.mp4$/),
-    expect.any(ReadableStream),
+    expect.objectContaining({ mimeType: "video/mp4" }),
     expect.objectContaining({ httpMetadata: { contentType: "video/mp4" } }),
   );
   const insert = prepared.find((item) => item.sql.includes("INSERT INTO assets"));
   expect(insert?.values[3]).toBe("video");
+});
+
+test("视频流无法写入 R2 时保留官方任务并返回可继续处理的存储错误", async () => {
+  const storageError = new TypeError("Provided readable stream must have a known length");
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    providerTaskId: "cgt-existing",
+    status: "running",
+    progress: 55,
+    options: { resolution: "720p", duration: 8 },
+  });
+  mocks.storeVideo.mockRejectedValueOnce(storageError);
+  mocks.generationFailure.mockReturnValueOnce({
+    code: "VIDEO_STORAGE_FAILED",
+    message: "视频已经生成，但媒体存储暂时不可用。",
+    retryable: true,
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(503);
+  await expect(response.json()).resolves.toMatchObject({
+    error: { code: "VIDEO_STORAGE_FAILED" },
+  });
+  expect(mocks.createVideoTask).not.toHaveBeenCalled();
+  expect(mocks.persistFailure).toHaveBeenCalledWith(
+    fakeDb,
+    "gen-1",
+    expect.stringMatching(/^lease_/),
+    expect.objectContaining({ code: "VIDEO_STORAGE_FAILED", retryable: true }),
+  );
+  expect(consoleError).toHaveBeenCalledWith("Generated media R2 write failed", expect.objectContaining({
+    errorName: "TypeError",
+    errorMessage: storageError.message,
+  }));
+});
+
+test("继续处理会直接复用已完整写入 R2 的视频并补齐资产记录", async () => {
+  const storageKey = "projects/project-1/ast_recovered/video.mp4";
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    modelId: null,
+    mediaType: "video",
+    providerTaskId: "cgt-existing",
+    status: "failed",
+    phase: "failed",
+    progress: 94,
+    errorCode: "VIDEO_ASSET_FINALIZE_FAILED",
+    errorMessage: "视频已经生成，但资产记录尚未完成。",
+    retryable: true,
+    options: { resolution: "720p", duration: 8 },
+  });
+  mocks.getStorageKey.mockResolvedValue(storageKey);
+  mocks.head.mockResolvedValue({
+    size: 12_345,
+    httpEtag: "etag",
+    httpMetadata: { contentType: "video/mp4" },
+    customMetadata: {
+      projectId: "project-1",
+      assetId: "ast_recovered",
+      generationId: "gen-1",
+      generatedByModelId: "mdl-deleted",
+    },
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(200);
+  expect(mocks.head).toHaveBeenCalledWith(storageKey);
+  expect(mocks.delete).not.toHaveBeenCalled();
+  expect(mocks.setStorageKey).not.toHaveBeenCalled();
+  expect(mocks.createVideoTask).not.toHaveBeenCalled();
+  expect(mocks.getVideoTask).not.toHaveBeenCalled();
+  expect(mocks.downloadVideo).not.toHaveBeenCalled();
+  expect(mocks.storeVideo).not.toHaveBeenCalled();
+  expect(mocks.requireModel).not.toHaveBeenCalled();
+  const insert = prepared.find((item) => item.sql.includes("INSERT INTO assets"));
+  expect(insert?.values[0]).toBe("ast_recovered");
+  expect(insert?.values[6]).toBe("video/mp4");
+  expect(insert?.values[7]).toBe(12_345);
+  expect(insert?.values[8]).toBe(storageKey);
+});
+
+test("存储检查点元数据不匹配时不会误用对象，而是清理后复用官方任务下载", async () => {
+  const previousStorageKey = "projects/project-1/ast_previous/video.mp4";
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    providerTaskId: "cgt-existing",
+    status: "failed",
+    phase: "failed",
+    progress: 82,
+    errorCode: "VIDEO_STORAGE_FAILED",
+    retryable: true,
+    options: { resolution: "720p", duration: 8 },
+  });
+  mocks.getStorageKey.mockResolvedValue(previousStorageKey);
+  mocks.head.mockResolvedValue({
+    size: 12_345,
+    httpEtag: "etag",
+    httpMetadata: { contentType: "video/mp4" },
+    customMetadata: {
+      projectId: "project-1",
+      assetId: "ast_previous",
+      generationId: "another-generation",
+      generatedByModelId: "mdl-1",
+    },
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(200);
+  expect(mocks.delete).toHaveBeenCalledWith(previousStorageKey);
+  expect(mocks.setStorageKey).toHaveBeenCalledWith(
+    fakeDb,
+    "gen-1",
+    expect.stringMatching(/^lease_/),
+    null,
+  );
+  expect(mocks.createVideoTask).not.toHaveBeenCalled();
+  expect(mocks.getVideoTask).toHaveBeenCalledWith(
+    expect.any(Object),
+    "cgt-existing",
+    fetch,
+    expect.any(AbortSignal),
+  );
+  expect(mocks.storeVideo).toHaveBeenCalledOnce();
 });
