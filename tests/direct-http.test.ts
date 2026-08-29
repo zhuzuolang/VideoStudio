@@ -8,6 +8,7 @@ import { directHttpFetch } from "@/lib/server/direct-http";
 
 function fakeSocket(responseChunks: Array<string | Uint8Array>) {
   const writes: Uint8Array[] = [];
+  const closeWritable = vi.fn();
   const socket = {
     readable: new ReadableStream<Uint8Array>({
       start(controller) {
@@ -19,11 +20,12 @@ function fakeSocket(responseChunks: Array<string | Uint8Array>) {
     }),
     writable: new WritableStream<Uint8Array>({
       write(chunk) { writes.push(chunk.slice()); },
+      close: closeWritable,
     }),
     opened: Promise.resolve({ remoteAddress: "8.163.6.244:8317" }),
     close: vi.fn(async () => undefined),
   };
-  return { socket, writes };
+  return { socket, writes, closeWritable };
 }
 
 function contentLengthResponse(status: number, body: string, contentType = "application/json"): string {
@@ -36,7 +38,7 @@ describe("allowlisted direct HTTP transport", () => {
     const responseBody = JSON.stringify({ choices: [{ message: { content: "OK" } }] });
     const wire = contentLengthResponse(200, responseBody);
     const split = Math.floor(wire.length / 2);
-    const { socket, writes } = fakeSocket([wire.slice(0, split), wire.slice(split)]);
+    const { socket, writes, closeWritable } = fakeSocket([wire.slice(0, split), wire.slice(split)]);
     const connect = vi.fn(() => socket);
     const requestBody = JSON.stringify({ model: "gpt-5.6-luna", prompt: "连接测试", stream: false });
 
@@ -64,6 +66,8 @@ describe("allowlisted direct HTTP transport", () => {
     expect(rawRequest).toContain(`Content-Length: ${new TextEncoder().encode(requestBody).byteLength}\r\n`);
     expect(rawRequest).toContain("Connection: close\r\n\r\n");
     expect(rawRequest.endsWith(requestBody)).toBe(true);
+    expect(closeWritable).not.toHaveBeenCalled();
+    expect(socket.close).toHaveBeenCalled();
   });
 
   test("decodes a chunked provider response split across socket reads", async () => {

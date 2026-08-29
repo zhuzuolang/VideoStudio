@@ -84,7 +84,11 @@ export async function directHttpFetch(
     try {
       await withinDeadline(writer.write(encoder.encode(requestLines.join("\r\n"))), deadline, closeSocket);
       if (body.byteLength > 0) await withinDeadline(writer.write(body), deadline, closeSocket);
-      await withinDeadline(writer.close(), deadline, closeSocket);
+      // Do not half-close the TCP write side after the declared request body.
+      // Some OpenAI-compatible gateways treat a client FIN as cancellation and
+      // return 499 (and some runtimes may also truncate the readable side).
+      // Content-Length already frames the request; the server's
+      // `Connection: close` response and our finally block close the socket.
     } finally {
       try { writer.releaseLock(); }
       catch { /* A timed-out write may still own the lock until the socket closes. */ }
