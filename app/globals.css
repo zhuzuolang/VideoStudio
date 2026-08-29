@@ -1937,6 +1937,8 @@ button:disabled {
 .script-create-modal fieldset.modal-fields { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
 .episode-create-modal fieldset.modal-fields { min-inline-size: 0; margin: 0; padding: 20px 22px; border: 0; }
 .script-create-modal .modal-fields textarea { min-height: 220px; resize: vertical; line-height: 1.65; }
+.script-rich-field { display: grid; grid-column: 1 / -1; gap: 7px; }
+.script-rich-field > span { color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
 .field-hint { color: var(--muted); font-size: 8px; line-height: 1.55; }
 .field-hint-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .field-hint-row .text-button { min-height: 24px; flex: 0 0 auto; padding: 0 8px; font-size: 8px; }

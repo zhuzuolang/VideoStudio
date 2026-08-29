@@ -46,6 +46,10 @@ import AgentStudio from "./components/AgentStudio";
 import AssetManager from "./components/AssetManager";
 import AssetPreviewMedia from "./components/AssetPreviewMedia";
 import ModelCenter from "./components/ModelCenter";
+import ScriptRichTextEditor, {
+  ScriptBodyText,
+  type ScriptMentionTarget,
+} from "./components/ScriptRichTextEditor";
 import StageAgentPanel, { type StageAgentStage } from "./components/StageAgentPanel";
 import { apiRequest } from "./components/platform-client";
 import type {
@@ -520,7 +524,7 @@ function CharactersView({ projectId, characters, onSaved }: { projectId: string;
   );
 }
 
-function ScriptsView({ projectId, episodes, scripts, onOpenAgent, onOpenEpisodes, onScriptsChange, onSaved }: { projectId: string; episodes: EpisodeRecord[]; scripts: ProjectScript[]; onOpenAgent: () => void; onOpenEpisodes: () => void; onScriptsChange: (scripts: ProjectScript[]) => void; onSaved: () => Promise<void> }) {
+function ScriptsView({ projectId, episodes, characters, scripts, assets, onOpenAgent, onOpenEpisodes, onScriptsChange, onSaved }: { projectId: string; episodes: EpisodeRecord[]; characters: CharacterRecord[]; scripts: ProjectScript[]; assets: ProjectAsset[]; onOpenAgent: () => void; onOpenEpisodes: () => void; onScriptsChange: (scripts: ProjectScript[]) => void; onSaved: () => Promise<void> }) {
   const [selectedId, setSelectedId] = useState(scripts[0]?.id ?? "");
   const [dialogMode, setDialogMode] = useState<"create" | "edit" | null>(null);
   const [saving, setSaving] = useState(false);
@@ -546,6 +550,23 @@ function ScriptsView({ projectId, episodes, scripts, onOpenAgent, onOpenEpisodes
     if (episodeId) counts[episodeId] = (counts[episodeId] ?? 0) + 1;
     return counts;
   }, {}), [scripts]);
+  const mentionTargets = useMemo<ScriptMentionTarget[]>(() => [
+    ...characters.map((character) => ({
+      id: character.id,
+      name: character.name,
+      type: "character" as const,
+      category: "character",
+      description: character.role || character.bio || "项目人物",
+    })),
+    ...assets.map((asset) => ({
+      id: asset.id,
+      name: asset.name,
+      type: "asset" as const,
+      category: asset.category,
+      mediaType: asset.mediaType,
+      description: asset.description,
+    })),
+  ], [assets, characters]);
   const effectiveSelectedId = scripts.some((item) => item.id === selectedId) ? selectedId : scripts[0]?.id ?? "";
   const script = scripts.find((item) => item.id === effectiveSelectedId) ?? scripts[0];
   const scenes = (script?.scenes ?? []) as SceneRecord[];
@@ -695,7 +716,7 @@ function ScriptsView({ projectId, episodes, scripts, onOpenAgent, onOpenEpisodes
       {actionError && <div className="inline-message error-message" role="alert"><AlertCircle size={14} />{actionError}</div>}
       {script ? <div className="script-workspace">
         <section className="surface scene-navigator"><div className="section-heading"><div><span className="section-kicker">DATABASE SCRIPTS</span><h2>剧本稿件</h2></div><span className="count-badge">{scripts.length}</span></div><div className="scene-list">{scripts.map((item) => { const episode = episodeOptions.find((option) => option.id === item.episodeId); return <button type="button" key={item.id} className={item.id === script.id ? "active" : ""} aria-current={item.id === script.id ? "true" : undefined} onClick={() => { setSelectedId(item.id); setActionError(""); }}><span className="scene-id">v{String(item.version ?? 1)}</span><span><b>{item.title}</b><small>{episode ? `第 ${episode.episodeNo} 集` : "未关联分集"} · {item.status} · {item.scenes.length} 场</small></span><i className={item.status === "review" ? "review" : ""} /></button>; })}</div></section>
-        <section className="script-paper"><div className="paper-toolbar"><span><Database size={15} /> {script.title} · v{String(script.version ?? 1)} · {linkedEpisode ? `第 ${linkedEpisode.episodeNo} 集` : "未关联分集"}</span><div><button type="button" className="quiet-button" onClick={openEditDialog} disabled={saving}><PencilLine size={14} /> 编辑剧本</button><button type="button" className="quiet-button danger-button" onClick={() => void deleteScript()} disabled={saving}><Trash2 size={14} /> 删除剧本</button><button type="button" className="quiet-button" onClick={onOpenAgent} disabled={saving}><Sparkles size={14} /> 交给 Agent</button></div></div><article className="screenplay"><p className="scene-heading-line">{scenes[0]?.heading || script.title}</p><p className="action-line">{scenes[0]?.action || String(script.bodyText ?? script.content ?? "尚未填写剧本正文。")}</p>{scenes[0]?.dialogue?.map((line, index) => <div className="dialogue-block" key={`${line.character}-${index}`}><p className="speaker-line">{line.character}</p><p className="dialogue-line">{line.line}</p></div>)}<div className="script-note"><Database size={15} /><span><b>持久化状态</b>正文、版本与 {scenes.length} 个场次已保存在当前项目中。</span></div></article><footer className="paper-footer"><span>{scenes.reduce((total, scene) => total + Number(scene.durationSeconds ?? 0), 0)} 秒预估时长</span><span>{script.status}</span></footer></section>
+        <section className="script-paper"><div className="paper-toolbar"><span><Database size={15} /> {script.title} · v{String(script.version ?? 1)} · {linkedEpisode ? `第 ${linkedEpisode.episodeNo} 集` : "未关联分集"}</span><div><button type="button" className="quiet-button" onClick={openEditDialog} disabled={saving}><PencilLine size={14} /> 编辑剧本</button><button type="button" className="quiet-button danger-button" onClick={() => void deleteScript()} disabled={saving}><Trash2 size={14} /> 删除剧本</button><button type="button" className="quiet-button" onClick={onOpenAgent} disabled={saving}><Sparkles size={14} /> 交给 Agent</button></div></div><article className="screenplay"><p className="scene-heading-line">{scenes[0]?.heading || script.title}</p><p className="action-line"><ScriptBodyText text={scenes[0]?.action || String(script.bodyText ?? script.content ?? "尚未填写剧本正文。")} targets={mentionTargets} /></p>{scenes[0]?.dialogue?.map((line, index) => <div className="dialogue-block" key={`${line.character}-${index}`}><p className="speaker-line">{line.character}</p><p className="dialogue-line">{line.line}</p></div>)}<div className="script-note"><Database size={15} /><span><b>持久化状态</b>正文、版本与 {scenes.length} 个场次已保存在当前项目中。</span></div></article><footer className="paper-footer"><span>{scenes.reduce((total, scene) => total + Number(scene.durationSeconds ?? 0), 0)} 秒预估时长</span><span>{script.status}</span></footer></section>
       </div> : <div className="platform-state script-empty-state"><FileText size={24} /><div><b>当前项目还没有剧本</b><span>创建第一份剧本，可立即填写正文，也可以稍后补充场次。</span><button type="button" className="primary-button" onClick={openCreateDialog}><Plus size={14} /> 创建第一份剧本</button></div></div>}
       {dialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDialog(); }}>
         <form className="modal-card script-create-modal" role="dialog" aria-modal="true" aria-labelledby="script-dialog-title" aria-busy={saving} onSubmit={saveScript}>
@@ -704,7 +725,7 @@ function ScriptsView({ projectId, episodes, scripts, onOpenAgent, onOpenEpisodes
             <label className="wide"><span>剧本标题 *</span><input ref={titleInputRef} required value={form.title} onChange={(event) => { setForm((current) => ({ ...current, title: event.target.value })); setFormError(""); }} placeholder="例如：第 1 集 · 雾港来信" /></label>
             <label className="wide"><span>关联已有分集（{episodeOptions.length} 集，可选）</span><select aria-label="关联已有分集" value={form.episodeId} onChange={(event) => { setForm((current) => ({ ...current, episodeId: event.target.value })); setFormError(""); }}><option value="">不关联分集</option>{episodeOptions.map((episode) => <option key={episode.id} value={episode.id}>第 {episode.episodeNo} 集 · {episode.title}{scriptCountByEpisode[episode.id] ? `（已有 ${scriptCountByEpisode[episode.id]} 份稿件）` : ""}</option>)}</select><span className="field-hint-row"><small className="field-hint">这里列出的是分集记录，不是剧本稿件；同一分集可以保存多个版本。</small><button type="button" className="text-button" onClick={openEpisodeManager}>去新建分集</button></span></label>
             {dialogMode === "edit" && <><label><span>状态</span><select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}><option value="draft">草稿</option><option value="review">审核中</option><option value="approved">已定稿</option></select></label><label><span>版本</span><input type="number" min="1" step="1" value={form.version} onChange={(event) => setForm((current) => ({ ...current, version: event.target.value }))} /></label></>}
-            <label className="wide"><span>剧本正文（可选）</span><textarea rows={11} value={form.bodyText} onChange={(event) => setForm((current) => ({ ...current, bodyText: event.target.value }))} placeholder="可直接粘贴剧本正文，留空则只创建剧本记录。" /></label>
+            <div className="wide script-rich-field"><span>剧本正文（可选）</span><ScriptRichTextEditor value={form.bodyText} targets={mentionTargets} disabled={saving} onChange={(bodyText) => setForm((current) => ({ ...current, bodyText }))} /></div>
           </fieldset>
           {formError && <div className="form-error" role="alert"><AlertCircle size={14} />{formError}</div>}
           <div className="modal-actions"><button type="button" className="quiet-button" onClick={closeDialog} disabled={saving}>取消</button><button type="submit" className="primary-button" disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : dialogMode === "edit" ? <Check size={15} /> : <Plus size={15} />} {saving ? "正在保存…" : dialogMode === "edit" ? "保存修改" : "创建剧本"}</button></div>
@@ -1123,7 +1144,7 @@ export default function Home() {
             {activeView === "overview" && <OverviewView data={data} navigate={navigate} onOpenRun={openAgentRun} />}
             {activeView === "story" && <StoryView key={`${project.id}-${String((data.story as StoryRecord | null)?.updatedAt ?? "new")}`} projectId={project.id} story={data.story as StoryRecord | null} episodes={data.episodes as EpisodeRecord[]} plannedEpisodeCount={Number(project.episodeCount ?? 0)} defaultDurationSeconds={Number(project.singleEpisodeDuration ?? 120)} onEpisodesChange={(episodes) => setData((current) => current?.project?.id === project.id ? { ...current, episodes } : current)} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("分集列表刷新失败"); }} />}
             {activeView === "characters" && <CharactersView key={project.id} projectId={project.id} characters={data.characters as CharacterRecord[]} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("人物列表刷新失败"); }} />}
-            {activeView === "scripts" && <ScriptsView key={project.id} projectId={project.id} episodes={data.episodes as EpisodeRecord[]} scripts={data.scripts} onOpenAgent={() => navigate("agent")} onOpenEpisodes={() => navigate("story")} onScriptsChange={(scripts) => setData((current) => current?.project?.id === project.id ? { ...current, scripts } : current)} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("剧本列表刷新失败"); }} />}
+            {activeView === "scripts" && <ScriptsView key={project.id} projectId={project.id} episodes={data.episodes as EpisodeRecord[]} characters={data.characters as CharacterRecord[]} scripts={data.scripts} assets={data.assets} onOpenAgent={() => navigate("agent")} onOpenEpisodes={() => navigate("story")} onScriptsChange={(scripts) => setData((current) => current?.project?.id === project.id ? { ...current, scripts } : current)} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("剧本列表刷新失败"); }} />}
             {activeView === "breakdown" && <BreakdownView scripts={data.scripts} />}
             {activeView === "assets" && <AssetManager key={project.id} refreshKey={refreshKey} projectId={project.id} projectName={project.name} onAssetsChange={(assets) => setData((current) => current?.project?.id === project.id ? { ...current, assets } : current)} />}
             {activeView === "shots" && <ShotsView scripts={data.scripts} assets={data.assets} onAssets={() => navigate("assets")} previewRevision={refreshKey} />}

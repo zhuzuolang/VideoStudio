@@ -1,0 +1,221 @@
+.root {
+  position: relative;
+  overflow: visible;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #fffefa;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.root:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.1);
+}
+
+.toolbar {
+  display: flex;
+  min-height: 39px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 8px;
+  background: #f8f6f0;
+  border-radius: 9px 9px 0 0;
+}
+
+.mentionButton {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  font-size: 8px;
+  font-weight: 700;
+  background: var(--panel);
+}
+
+.mentionButton:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.editor {
+  min-height: 220px;
+  max-height: min(42vh, 430px);
+  overflow-y: auto;
+  padding: 17px 18px;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-size: 13px;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.combobox {
+  min-width: 0;
+}
+
+.editor:empty::before {
+  color: var(--muted-light);
+  content: attr(data-placeholder);
+  pointer-events: none;
+}
+
+.editor[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.mention {
+  display: inline;
+  padding: 2px 5px;
+  border: 1px solid rgba(232, 83, 32, 0.18);
+  border-radius: 6px;
+  color: var(--accent-strong);
+  font-family: var(--font-geist-sans), "PingFang SC", sans-serif;
+  font-size: 0.88em;
+  font-weight: 750;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: var(--accent-soft);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.menu {
+  position: absolute;
+  z-index: 8;
+  top: 45px;
+  right: 10px;
+  left: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 45px rgba(36, 32, 23, 0.18);
+}
+
+.menuHeader {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 9px;
+  background: #f8f6f0;
+}
+
+.menuHeader span {
+  flex: 1;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menuHeader small {
+  font-size: 8px;
+}
+
+.options {
+  max-height: 230px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.options button {
+  display: grid;
+  width: 100%;
+  min-height: 48px;
+  grid-template-columns: 30px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  text-align: left;
+  background: transparent;
+}
+
+.options button:hover,
+.options button.activeOption,
+.options button[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+
+.targetAvatar {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  background: linear-gradient(145deg, #ff875c, #b94a25);
+}
+
+.targetCopy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.targetCopy b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.targetCopy small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emptyResult {
+  padding: 20px 12px;
+  color: var(--muted);
+  font-size: 9px;
+  text-align: center;
+}
+
+.renderedText {
+  white-space: pre-wrap;
+}
+
+.renderedMention {
+  cursor: help;
+  font-size: 0.78em;
+}
+
+@media (max-width: 640px) {
+  .toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .menu {
+    top: 69px;
+  }
+
+  .editor {
+    min-height: 260px;
+    padding: 15px;
+  }
+}
