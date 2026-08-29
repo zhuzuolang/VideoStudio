@@ -10,7 +10,8 @@ import { validateModelEndpoint, validatePublicHttpsUrl } from "./outbound";
 
 const MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const MAX_GENERATED_VIDEO_BYTES = 100 * 1024 * 1024;
-const TASK_REQUEST_TIMEOUT_MS = 30_000;
+const TASK_CREATE_REQUEST_TIMEOUT_MS = 120_000;
+const TASK_STATUS_REQUEST_TIMEOUT_MS = 30_000;
 const VIDEO_DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_VIDEO_REDIRECTS = 3;
 const MAX_REFERENCE_IMAGE_BYTES = 30 * 1024 * 1024;
@@ -287,8 +288,8 @@ export async function createVideoGenerationTask(
       body: JSON.stringify(request),
       redirect: "manual",
       signal: input.signal
-        ? AbortSignal.any([input.signal, AbortSignal.timeout(TASK_REQUEST_TIMEOUT_MS)])
-        : AbortSignal.timeout(TASK_REQUEST_TIMEOUT_MS),
+        ? AbortSignal.any([input.signal, AbortSignal.timeout(TASK_CREATE_REQUEST_TIMEOUT_MS)])
+        : AbortSignal.timeout(TASK_CREATE_REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw taskNetworkError(error, input.signal, "提交");
@@ -322,7 +323,7 @@ export async function getVideoGenerationTask(
       method: "GET",
       headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
       redirect: "manual",
-      signal: AbortSignal.timeout(TASK_REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(TASK_STATUS_REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw taskNetworkError(error, undefined, "查询");
@@ -383,7 +384,7 @@ export async function testVideoGenerationConnection(
       method: "GET",
       headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
       redirect: "manual",
-      signal: AbortSignal.timeout(TASK_REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(TASK_STATUS_REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw taskNetworkError(error, undefined, "验证");
@@ -785,10 +786,13 @@ function taskNetworkError(error: unknown, externalSignal: AbortSignal | undefine
     return new ApiError(409, "GENERATION_LEASE_LOST", `生成任务执行权已过期，已停止${action}视频任务。`);
   }
   const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+  const timeoutMessage = action === "提交"
+    ? "视频服务提交请求长时间未响应，任务可能已被服务商受理。为避免重复计费，请先在服务商控制台核对任务记录。"
+    : `视频服务${action}请求超时，请稍后重试。`;
   return new ApiError(
     502,
     timedOut ? "VIDEO_MODEL_TIMEOUT" : "VIDEO_MODEL_NETWORK_ERROR",
-    timedOut ? `视频服务${action}请求超时，请稍后重试。` : `无法连接视频生成服务，${action}任务失败。`,
+    timedOut ? timeoutMessage : `无法连接视频生成服务，${action}任务失败。`,
   );
 }
 

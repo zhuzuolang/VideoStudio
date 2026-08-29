@@ -254,6 +254,38 @@ describe("异步任务创建和查询", () => {
     );
   });
 
+  test("创建任务为参考素材预处理保留 120 秒响应窗口", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: "cgt-slow-create" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+
+    try {
+      await expect(createVideoGenerationTask(configuredModel(3), {
+        prompt: "多参考图视频",
+      }, fetchImpl)).resolves.toEqual({ taskId: "cgt-slow-create" });
+      expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  test("提交超时时提示先核对服务商任务，避免重复计费", async () => {
+    const timeoutError = new Error("timed out");
+    timeoutError.name = "TimeoutError";
+    const fetchImpl = vi.fn(async () => {
+      throw timeoutError;
+    }) as unknown as typeof fetch;
+
+    await expect(createVideoGenerationTask(configuredModel(3), {
+      prompt: "多参考图视频",
+    }, fetchImpl)).rejects.toMatchObject({
+      code: "VIDEO_MODEL_TIMEOUT",
+      message: expect.stringContaining("任务可能已被服务商受理"),
+    });
+  });
+
   test("查询成功任务，提取视频、尾帧和 usage", async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
       id: "cgt-success",
