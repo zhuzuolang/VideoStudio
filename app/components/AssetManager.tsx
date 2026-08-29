@@ -317,6 +317,44 @@ function isDefinitiveGenerationSubmissionFailure(reason: unknown): boolean {
   ]).has(reason.code);
 }
 
+const UNCERTAIN_VIDEO_SUBMISSION_CODES = new Set([
+  "VIDEO_MODEL_TIMEOUT",
+  "VIDEO_MODEL_NETWORK_ERROR",
+  "VIDEO_PROVIDER_UNAVAILABLE",
+  "INVALID_VIDEO_TASK_RESPONSE",
+  "VIDEO_RESPONSE_STREAM_FAILED",
+  "VIDEO_GENERATION_FAILED",
+  "VIDEO_PROCESSING_FAILED",
+  "VIDEO_SUBMISSION_STATE_UNKNOWN",
+]);
+
+const TERMINAL_VIDEO_TASK_CODES = new Set([
+  "VIDEO_TASK_NOT_FOUND",
+  "VIDEO_TASK_FAILED",
+  "VIDEO_TASK_CANCELLED",
+  "VIDEO_TASK_EXPIRED",
+]);
+
+function generationRetryConfirmation(generation: AssetGenerationJob): string {
+  if (generation.mediaType === "video"
+    && !generation.providerTaskId
+    && UNCERTAIN_VIDEO_SUBMISSION_CODES.has(generation.errorCode || "")) {
+    return "上次视频任务是否已被服务商受理无法确认。再次提交可能创建重复任务并产生额外费用。请先在火山方舟控制台核对；仍要重试吗？";
+  }
+  if (generation.mediaType === "video"
+    && generation.providerTaskId
+    && TERMINAL_VIDEO_TASK_CODES.has(generation.errorCode || "")) {
+    return "原官方视频任务已经结束。重试将创建新的官方视频任务，并可能再次计费。确定继续吗？";
+  }
+  return "该失败无法安全自动重试。再次尝试可能重新调用模型并产生费用，也可能因原配置或内容问题再次失败。确定继续吗？";
+}
+
+function canResumeExistingVideoTask(generation: AssetGenerationJob): boolean {
+  return generation.mediaType === "video"
+    && Boolean(generation.providerTaskId)
+    && !TERMINAL_VIDEO_TASK_CODES.has(generation.errorCode || "");
+}
+
 function AssetPreview({ asset }: { asset: ProjectAsset }) {
   const Icon = MEDIA_META[asset.mediaType]?.icon ?? Package;
   const imageSource =
@@ -404,6 +442,17 @@ function GenerationCard({
   const pollingOfficialVideo = active && generation.mediaType === "video" && generation.phase === "model";
   const submissionUnconfirmed = generation.status === "submitting"
     && generation.errorCode === "GENERATION_SUBMISSION_UNCONFIRMED";
+  const resumableVideoTask = failed && canResumeExistingVideoTask(generation);
+  const retryAvailable = submissionUnconfirmed || (failed && !generation.id.startsWith("local:"));
+  const confirmedRetryRequired = failed && !generation.retryable
+    && !resumableVideoTask && !generation.id.startsWith("local:");
+  const retryActionLabel = submissionUnconfirmed
+    ? "重新确认任务"
+    : resumableVideoTask
+      ? "继续处理"
+      : confirmedRetryRequired
+        ? "确认后重试"
+        : "重试生成";
   const MediaIcon = generation.mediaType === "video" ? Video : ImageIcon;
   const mediaLabel = generation.mediaType === "video" ? "视频" : "图片";
   return (
@@ -458,15 +507,16 @@ function GenerationCard({
           <time>{formatCompactDate(generation.updatedAt || generation.createdAt)}</time>
           {failed || submissionUnconfirmed ? (
             <div className={styles.generationActions}>
-              {(generation.retryable || submissionUnconfirmed) && (
+              {retryAvailable && (
                 <button
                   type="button"
                   className={styles.textButton}
                   onClick={() => onRetry(generation)}
                   disabled={processing}
+                  aria-label={`${retryActionLabel} ${generation.name}`}
                 >
                   {processing ? <LoaderCircle className={styles.spinner} size={12} /> : <RefreshCw size={12} />}
-                  {submissionUnconfirmed ? "重新确认任务" : "重试生成"}
+                  {retryActionLabel}
                 </button>
               )}
               <button type="button" className={styles.textButton} onClick={() => onDismiss(generation)} disabled={processing}>
@@ -788,7 +838,7 @@ export default function AssetManager({
     }
   }, [projectId]);
 
-  const runGeneration = useCallback(async (generationId: string, retry = false) => {
+  const runGeneration = useCallback(async (generationId: string, retry = false, confirmedRetry = false) => {
     const requestId = `${projectId}:${generationId}`;
     if (processingGenerationIds.current.has(requestId)) return;
     processingGenerationIds.current.add(requestId);
@@ -800,7 +850,7 @@ export default function AssetManager({
     try {
       await apiRequest(`/api/projects/${encodeURIComponent(projectId)}/assets/generate/${encodeURIComponent(generationId)}`, {
         method: "POST",
-        body: JSON.stringify({ retry }),
+        body: JSON.stringify({ retry, confirmedRetry }),
       });
     } catch {
       // The runner persists its safe error on the job. Refreshing below makes the card
@@ -1436,8 +1486,9 @@ export default function AssetManager({
       void confirmUncertainGeneration(generation);
       return;
     }
-    if (!generation.retryable) return;
-    void runGeneration(generation.id, true);
+    const confirmedRetry = !generation.retryable && !canResumeExistingVideoTask(generation);
+    if (confirmedRetry && !window.confirm(generationRetryConfirmation(generation))) return;
+    void runGeneration(generation.id, true, confirmedRetry);
   }
   async function dismissGeneration(generation: AssetGenerationJob) {
     generationRequestSequence.current += 1;

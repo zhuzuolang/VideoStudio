@@ -36,6 +36,12 @@ const TRANSIENT_VIDEO_TASK_QUERY_CODES = new Set([
   "INVALID_VIDEO_TASK_RESPONSE",
   "VIDEO_RESPONSE_STREAM_FAILED",
 ]);
+const VIDEO_TASK_RESTART_CODES = new Set([
+  "VIDEO_TASK_NOT_FOUND",
+  "VIDEO_TASK_FAILED",
+  "VIDEO_TASK_CANCELLED",
+  "VIDEO_TASK_EXPIRED",
+]);
 
 function shouldContinueVideoTaskPolling(error: unknown): error is ApiError {
   return error instanceof ApiError && TRANSIENT_VIDEO_TASK_QUERY_CODES.has(error.code);
@@ -110,17 +116,32 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     await requireOwnedProject(db, projectId, identity.userId);
     const body = await readJsonObject(request);
     const retry = optionalBoolean(body, "retry") ?? false;
+    const confirmedRetry = optionalBoolean(body, "confirmedRetry") ?? false;
     const generation = await getAssetGeneration(db, projectId, identity.userId, generationId);
     generationMediaType = generation.mediaType;
+    if (confirmedRetry && (!retry || generation.status !== "failed")) {
+      throw new ApiError(400, "INVALID_GENERATION_RETRY", "确认重试只能用于已经失败的生成任务。");
+    }
+    const restartProviderTask = confirmedRetry
+      && generation.mediaType === "video"
+      && Boolean(generation.providerTaskId)
+      && VIDEO_TASK_RESTART_CODES.has(generation.errorCode || "");
+    const canResumeProviderTask = generation.mediaType === "video"
+      && Boolean(generation.providerTaskId)
+      && !VIDEO_TASK_RESTART_CODES.has(generation.errorCode || "");
 
     if (generation.status === "succeeded") return ok({ generation });
     if (generation.status === "failed" && !retry) {
       throw new ApiError(409, "GENERATION_RETRY_REQUIRED", "该生成任务已失败，请确认后重试。");
     }
-    if (generation.status === "failed" && retry && !generation.retryable) {
+    if (generation.status === "failed" && retry
+      && !generation.retryable && !confirmedRetry && !canResumeProviderTask) {
       throw new ApiError(409, "GENERATION_NOT_RETRYABLE", generation.errorMessage || "当前错误无法通过重复请求解决，请修改模型配置或提示词后新建任务。");
     }
-    if (generation.status === "failed" && retry && !generation.providerTaskId && generation.attemptCount >= 3) {
+    // The three-attempt cap guards automatic retries. An owner-confirmed retry is a
+    // deliberate new attempt and may proceed after the cap, including the billing warning shown by the client.
+    if (generation.status === "failed" && retry && !confirmedRetry
+      && !generation.providerTaskId && generation.attemptCount >= 3) {
       throw new ApiError(409, "GENERATION_ATTEMPT_LIMIT", "该任务已达到 3 次尝试上限，请检查模型配置后新建任务。");
     }
 
@@ -130,12 +151,24 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     const claim = generation.status === "failed"
       ? await db.prepare(`UPDATE asset_generation_jobs SET
           status = 'running', phase = 'model', progress = 15,
-          attempt_count = attempt_count + CASE WHEN provider_task_id IS NULL THEN 1 ELSE 0 END,
+          attempt_count = attempt_count + CASE WHEN provider_task_id IS NULL OR ? = 1 THEN 1 ELSE 0 END,
+          provider_task_id = CASE WHEN ? = 1 THEN NULL ELSE provider_task_id END,
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
           next_poll_at = NULL, updated_at = ?, started_at = ?, completed_at = NULL
         WHERE id = ? AND project_id = ? AND owner_id = ? AND status = 'failed'
-          AND dismissed_at IS NULL AND (provider_task_id IS NOT NULL OR attempt_count < 3)`)
-        .bind(leaseToken, leaseExpiresAt, now, now, generationId, projectId, identity.userId).run()
+          AND dismissed_at IS NULL AND (? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3)`)
+        .bind(
+          restartProviderTask ? 1 : 0,
+          restartProviderTask ? 1 : 0,
+          leaseToken,
+          leaseExpiresAt,
+          now,
+          now,
+          generationId,
+          projectId,
+          identity.userId,
+          confirmedRetry ? 1 : 0,
+        ).run()
       : await db.prepare(`UPDATE asset_generation_jobs SET
           status = 'running', phase = 'model', progress = MAX(progress, 15),
           attempt_count = attempt_count + CASE WHEN provider_task_id IS NULL THEN 1 ELSE 0 END,
@@ -187,7 +220,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     let generatedSize = 0;
     let revisedPrompt: string | null = null;
     let providerUsage: Record<string, unknown> | null = null;
-    let resolvedProviderTaskId = generation.providerTaskId ?? null;
+    let resolvedProviderTaskId = restartProviderTask ? null : generation.providerTaskId ?? null;
 
     if (generation.mediaType === "video") {
       if (!resolvedProviderTaskId) {

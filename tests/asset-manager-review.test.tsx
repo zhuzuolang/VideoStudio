@@ -392,11 +392,24 @@ describe("AssetManager 审查项回归", () => {
       errorMessage: "官方视频任务状态暂时未同步，系统会继续查询，不会停止生成。",
       canRun: false,
     });
+    const resumableJob = makeGenerationJob({
+      id: "gen-video-storage",
+      mediaType: "video",
+      name: "等待入库任务",
+      status: "failed",
+      phase: "failed",
+      progress: 82,
+      providerTaskId: "cgt-succeeded",
+      errorCode: "VIDEO_STORAGE_FAILED",
+      errorMessage: "视频已生成，但媒体存储暂时不可用。",
+      retryable: true,
+      canRun: false,
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [queuedJob, delayedJob] });
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [queuedJob, delayedJob, resumableJob] });
         if (url.endsWith("/assets") || url.endsWith("/characters") || url === "/api/models") return jsonResponse([]);
         throw new Error(`unexpected request: ${url}`);
       }),
@@ -417,6 +430,67 @@ describe("AssetManager 审查项回归", () => {
     expect(within(delayedCard as HTMLElement).getByText("正在重新查询官方任务状态")).toBeVisible();
     expect(within(delayedCard as HTMLElement).getByText(/不会停止生成/)).toBeVisible();
     expect(within(delayedCard as HTMLElement).queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "继续处理 等待入库任务" })).toBeVisible();
+  });
+
+  test("不可自动重试的视频失败卡在风险确认后重新提交", async () => {
+    let serverJob = makeGenerationJob({
+      id: "gen-video-failed",
+      mediaType: "video",
+      name: "超时视频任务",
+      status: "failed",
+      phase: "failed",
+      progress: 15,
+      attemptCount: 1,
+      providerTaskId: null,
+      errorCode: "VIDEO_MODEL_TIMEOUT",
+      errorMessage: "视频服务提交结果无法确认。",
+      retryable: false,
+      canRun: false,
+    });
+    let retryBody: Record<string, unknown> | null = null;
+    let runnerCalls = 0;
+    const confirmMock = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    vi.stubGlobal("confirm", confirmMock);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/assets/generate/gen-video-failed") && init?.method === "POST") {
+          runnerCalls += 1;
+          retryBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          serverJob = {
+            ...serverJob,
+            status: "running",
+            phase: "model",
+            errorCode: null,
+            errorMessage: null,
+            canRun: false,
+          };
+          return new Response(JSON.stringify({ data: { generation: serverJob } }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [serverJob] });
+        if (url.endsWith("/assets") || url.endsWith("/characters") || url === "/api/models") return jsonResponse([]);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+
+    const retryButton = await screen.findByRole("button", { name: "确认后重试 超时视频任务" });
+    await user.click(retryButton);
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("重复任务"));
+    expect(runnerCalls).toBe(0);
+
+    await user.click(retryButton);
+    await waitFor(() => expect(runnerCalls).toBe(1));
+    expect(retryBody).toEqual({ retry: true, confirmedRetry: true });
   });
 
   test("视频参考图只列出已就绪项目图片，并按重排后的顺序与角色提交", async () => {

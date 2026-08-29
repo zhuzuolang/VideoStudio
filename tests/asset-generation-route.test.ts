@@ -273,6 +273,116 @@ test("执行失败会持久化安全错误，卡片可从数据库恢复", async
   expect(mocks.put).not.toHaveBeenCalled();
 });
 
+test("不可安全自动重试的失败必须由用户显式确认", async () => {
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    status: "failed",
+    phase: "failed",
+    progress: 15,
+    attemptCount: 1,
+    retryable: false,
+    errorCode: "VIDEO_MODEL_TIMEOUT",
+    errorMessage: "视频服务提交结果无法确认。",
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(409);
+  expect(mocks.createVideoTask).not.toHaveBeenCalled();
+  expect(mocks.getVideoTask).not.toHaveBeenCalled();
+});
+
+test("确认承担重复计费风险后可重新提交状态不确定的视频任务", async () => {
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    status: "failed",
+    phase: "failed",
+    progress: 15,
+    attemptCount: 3,
+    retryable: false,
+    errorCode: "VIDEO_MODEL_TIMEOUT",
+    errorMessage: "视频服务提交结果无法确认。",
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true, confirmedRetry: true }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(202);
+  expect(mocks.createVideoTask).toHaveBeenCalledOnce();
+  expect(mocks.getVideoTask).not.toHaveBeenCalled();
+  const retryClaim = prepared.find((item) => item.sql.includes("status = 'running'") && item.sql.includes("status = 'failed'"));
+  expect(retryClaim?.sql).toContain("? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3");
+  expect(retryClaim?.values.at(-1)).toBe(1);
+});
+
+test("官方视频任务终止后，确认重试会清除旧任务号并创建新任务", async () => {
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    providerTaskId: "cgt-expired",
+    status: "failed",
+    phase: "failed",
+    progress: 55,
+    attemptCount: 1,
+    retryable: false,
+    errorCode: "VIDEO_TASK_EXPIRED",
+    errorMessage: "官方视频任务已过期。",
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true, confirmedRetry: true }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(202);
+  expect(mocks.createVideoTask).toHaveBeenCalledOnce();
+  expect(mocks.getVideoTask).not.toHaveBeenCalled();
+  const retryClaim = prepared.find((item) => item.sql.includes("status = 'running'") && item.sql.includes("status = 'failed'"));
+  expect(retryClaim?.sql).toContain("provider_task_id = CASE WHEN ? = 1 THEN NULL");
+  expect(retryClaim?.values.slice(0, 2)).toEqual([1, 1]);
+});
+
+test("视频已生成但入库失败时复用原官方任务，不会重复创建", async () => {
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    providerTaskId: "cgt-existing",
+    status: "failed",
+    phase: "failed",
+    progress: 82,
+    attemptCount: 1,
+    retryable: true,
+    errorCode: "VIDEO_STORAGE_FAILED",
+    errorMessage: "视频已生成，但媒体存储暂时不可用。",
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true, confirmedRetry: false }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(200);
+  expect(mocks.createVideoTask).not.toHaveBeenCalled();
+  expect(mocks.getVideoTask).toHaveBeenCalledWith(
+    expect.any(Object),
+    "cgt-existing",
+    fetch,
+    expect.any(AbortSignal),
+  );
+  expect(mocks.downloadVideo).toHaveBeenCalledOnce();
+});
+
 test("视频首次执行按序解析项目参考图，只创建一次供应商任务并持久化任务号", async () => {
   const referenceImages = [
     { assetId: "asset-street", role: "reference_image" },
