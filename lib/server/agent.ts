@@ -1,6 +1,7 @@
 import { ApiError, parseJson } from "./api";
 import { decryptApiKey } from "./crypto";
-import { validateModelEndpoint } from "./outbound";
+import { directHttpFetch } from "./direct-http";
+import { allowlistedPublicHttpModelEndpoint, validateModelEndpoint } from "./outbound";
 import { sceneSelect, serializeSceneRecord } from "./records";
 import { mediaBucket } from "./runtime";
 import { allRows, listAssetRelations } from "./store";
@@ -231,7 +232,7 @@ export async function callConfiguredModel(
   };
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    const requestInit: RequestInit = {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -241,8 +242,12 @@ export async function callConfiguredModel(
       body: JSON.stringify(payload),
       redirect: "manual",
       signal: AbortSignal.timeout(120_000),
-    });
+    };
+    response = allowlistedPublicHttpModelEndpoint(endpoint)
+      ? await directHttpFetch(endpoint, requestInit, { timeoutMs: 120_000, maxResponseBytes: 2 * 1024 * 1024 })
+      : await fetch(endpoint, requestInit);
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     throw new ApiError(502, "MODEL_NETWORK_ERROR", error instanceof Error && error.name === "TimeoutError" ? "模型响应超时。" : "无法连接到模型服务。 ");
   }
   if (response.status >= 300 && response.status < 400) {

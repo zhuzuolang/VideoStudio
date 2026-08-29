@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./", import.meta.url)),
+      "cloudflare:sockets": fileURLToPath(new URL("./tests/cloudflare-sockets-shim.ts", import.meta.url)),
     },
   },
   test: {

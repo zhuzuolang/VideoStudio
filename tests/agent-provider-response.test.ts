@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  allowlistedPublicHttpModelEndpoint: vi.fn<(value: string) => string | null>(() => null),
   decryptApiKey: vi.fn(async () => "provider-key"),
+  directHttpFetch: vi.fn(),
   validateModelEndpoint: vi.fn(async (value: string) => value),
 }));
 
 vi.mock("@/lib/server/crypto", () => ({ decryptApiKey: mocks.decryptApiKey }));
 vi.mock("@/lib/server/outbound", () => ({
+  allowlistedPublicHttpModelEndpoint: mocks.allowlistedPublicHttpModelEndpoint,
   validateModelEndpoint: mocks.validateModelEndpoint,
 }));
+vi.mock("@/lib/server/direct-http", () => ({ directHttpFetch: mocks.directHttpFetch }));
 vi.mock("@/lib/server/runtime", () => ({ mediaBucket: vi.fn() }));
 
 import { callConfiguredModel } from "@/lib/server/agent";
@@ -24,6 +28,7 @@ const configuredModel: Record<string, unknown> = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.allowlistedPublicHttpModelEndpoint.mockReturnValue(null);
   mocks.decryptApiKey.mockResolvedValue("provider-key");
   mocks.validateModelEndpoint.mockImplementation(async (value: string) => value);
 });
@@ -54,6 +59,45 @@ describe("OpenAI-compatible provider responses", () => {
         Authorization: "Bearer provider-key",
       },
     });
+  });
+
+  test("uses the direct transport for an explicitly allowlisted HTTP endpoint", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.allowlistedPublicHttpModelEndpoint.mockImplementation((value: string) => value);
+    mocks.directHttpFetch.mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: "模型连接正常" } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(callConfiguredModel(configuredModel, "测试", null, []))
+      .resolves.toMatchObject({ response: "模型连接正常" });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mocks.directHttpFetch).toHaveBeenCalledWith(
+      "http://8.163.6.244:8317/v1/chat/completions",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ Authorization: "Bearer provider-key" }),
+      }),
+      { timeoutMs: 120_000, maxResponseBytes: 2 * 1024 * 1024 },
+    );
+  });
+
+  test("does not expose a direct provider error body or API key", async () => {
+    mocks.allowlistedPublicHttpModelEndpoint.mockImplementation((value: string) => value);
+    mocks.directHttpFetch.mockResolvedValue(new Response(
+      "provider-key must stay private; upstream diagnostic must stay private",
+      { status: 401, headers: { "Content-Type": "text/plain" } },
+    ));
+
+    const error = await callConfiguredModel(configuredModel, "测试", null, []).catch((reason) => reason);
+    expect(error).toMatchObject({
+      code: "MODEL_REQUEST_REJECTED",
+      details: { providerStatus: 401 },
+    });
+    const publicError = JSON.stringify({ code: error.code, message: error.message, details: error.details });
+    expect(publicError).not.toContain("provider-key");
+    expect(publicError).not.toContain("upstream diagnostic");
   });
 
   test("keeps the provider status when an error response is not JSON", async () => {
