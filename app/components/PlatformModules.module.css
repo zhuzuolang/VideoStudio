@@ -787,6 +787,115 @@
   overflow: hidden;
 }
 
+.generationDetailDialog {
+  width: min(780px, 100%);
+}
+
+.generationDetailBody {
+  display: grid;
+  gap: 12px;
+  background: color-mix(in srgb, var(--module-soft) 42%, var(--module-paper));
+}
+
+.generationDetailSection {
+  display: grid;
+  gap: 11px;
+  padding: 14px;
+  border: 1px solid var(--module-line);
+  border-radius: 11px;
+  background: var(--module-paper);
+}
+
+.generationDetailSection h3 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.generationDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.generationDetailGrid > div {
+  min-width: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--module-soft);
+}
+
+.generationDetailGrid dt {
+  margin-bottom: 5px;
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.generationDetailGrid dd {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.generationDetailGrid dd b,
+.generationDetailGrid dd small {
+  display: block;
+}
+
+.generationDetailGrid dd small {
+  margin-top: 3px;
+  color: var(--module-muted);
+  font-size: 8px;
+}
+
+.generationDetailGrid code {
+  font-size: 8px;
+  word-break: break-all;
+}
+
+.generationDetailWide {
+  grid-column: 1 / -1;
+}
+
+.generationDetailPrompt {
+  margin: 0;
+  color: var(--module-ink);
+  font-size: 10px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.generationDetailList {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.generationDetailList li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--module-soft);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.generationDetailList li b {
+  color: var(--module-accent-strong);
+}
+
+.generationDetailList li span {
+  min-width: 0;
+  word-break: break-word;
+}
+
 .previewDialogBody {
   display: grid;
   min-height: 0;
@@ -2292,6 +2401,14 @@
   }
 
   .fieldFull {
+    grid-column: auto;
+  }
+
+  .generationDetailGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .generationDetailWide {
     grid-column: auto;
   }
 

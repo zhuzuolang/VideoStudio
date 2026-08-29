@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element -- project assets use authenticated and user-provided URLs. */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertCircle,
@@ -429,11 +429,13 @@ function assetStatusLabel(asset: ProjectAsset): string {
 function GenerationCard({
   generation,
   processing,
+  onOpen,
   onRetry,
   onDismiss,
 }: {
   generation: AssetGenerationJob;
   processing: boolean;
+  onOpen: (generation: AssetGenerationJob) => void;
   onRetry: (generation: AssetGenerationJob) => void;
   onDismiss: (generation: AssetGenerationJob) => void;
 }) {
@@ -523,6 +525,15 @@ function GenerationCard({
           <time>{formatCompactDate(generation.updatedAt || generation.createdAt)}</time>
           {failed || submissionUnconfirmed ? (
             <div className={styles.generationActions}>
+              <button
+                type="button"
+                className={styles.textButton}
+                onClick={() => onOpen(generation)}
+                aria-label={`查看生成参数 ${generation.name}`}
+                aria-haspopup="dialog"
+              >
+                <Eye size={12} /> 查看参数
+              </button>
               {retryAvailable && (
                 <button
                   type="button"
@@ -540,11 +551,170 @@ function GenerationCard({
               </button>
             </div>
           ) : (
-            <small>第 {Math.max(1, generation.attemptCount)} 次尝试</small>
+            <div className={styles.generationActions}>
+              <button
+                type="button"
+                className={styles.textButton}
+                onClick={() => onOpen(generation)}
+                aria-label={`查看生成参数 ${generation.name}`}
+                aria-haspopup="dialog"
+              >
+                <Eye size={12} /> 查看参数
+              </button>
+              <small>第 {Math.max(1, generation.attemptCount)} 次尝试</small>
+            </div>
           )}
         </div>
       </div>
     </article>
+  );
+}
+
+const VIDEO_REFERENCE_ROLE_LABELS: Record<VideoReferenceImageRole, string> = {
+  first_frame: "首帧",
+  last_frame: "尾帧",
+  reference_image: "内容参考",
+};
+
+function formatGenerationTimestamp(value?: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function GenerationDetailsDialog({
+  generation,
+  models,
+  assets,
+  characters,
+  closeButtonRef,
+  onClose,
+}: {
+  generation: AssetGenerationJob;
+  models: AiModel[];
+  assets: ProjectAsset[];
+  characters: CharacterOption[];
+  closeButtonRef: RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+}) {
+  const configuredModel = models.find((model) => model.id === generation.modelId);
+  const references = generation.options.referenceImages ?? [];
+  const legacyReferenceUrl = generation.options.referenceImageUrl?.trim() || "";
+  const legacyReferenceRole = generation.options.referenceImageRole ?? "reference_image";
+  const relationTargetName = (relation: AssetRelationInput) => relation.targetType === "asset"
+    ? assets.find((asset) => asset.id === relation.targetId)?.name ?? relation.targetId
+    : characters.find((character) => character.id === relation.targetId)?.name ?? relation.targetId;
+  const referenceAssetName = (assetId: string) => assets.find((asset) => asset.id === assetId)?.name ?? assetId;
+  const failed = generation.status === "failed";
+
+  return (
+    <div
+      className={styles.dialogBackdrop}
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        className={joinClassNames(styles.dialog, styles.generationDetailDialog)}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="generation-detail-title"
+      >
+        <header className={styles.dialogHeader}>
+          <div>
+            <span className={styles.eyebrow}>GENERATION PARAMETERS</span>
+            <h2 id="generation-detail-title">{generation.name}</h2>
+            <p>{generationStatusLabel(generation.status)} · {generationPhaseLabel(generation)}</p>
+          </div>
+          <button
+            ref={closeButtonRef}
+            className={styles.iconButton}
+            type="button"
+            aria-label="关闭生成任务详情"
+            onClick={onClose}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className={joinClassNames(styles.dialogBody, styles.generationDetailBody)}>
+          <section className={styles.generationDetailSection} aria-labelledby="generation-detail-input-title">
+            <h3 id="generation-detail-input-title">提交参数</h3>
+            <dl className={styles.generationDetailGrid}>
+              <div><dt>生成模型</dt><dd><b>{generation.modelName}</b><small>{configuredModel?.modelId ? `官方模型：${configuredModel.modelId}` : generation.modelId ? `配置 ID：${generation.modelId}` : "模型配置已移除"}</small></dd></div>
+              <div><dt>生成类型</dt><dd>{generation.mediaType === "video" ? "视频" : "图片"}</dd></div>
+              <div><dt>制作分类</dt><dd>{CATEGORY_META[generation.category].label}</dd></div>
+              <div><dt>画面比例</dt><dd>{generation.aspectRatio || "模型默认"}</dd></div>
+              {generation.mediaType === "image" && <div><dt>图片尺寸</dt><dd>{generation.size || "模型默认"}</dd></div>}
+              {generation.mediaType === "video" && <>
+                <div><dt>分辨率</dt><dd>{generation.options.resolution || "模型默认"}</dd></div>
+                <div><dt>时长</dt><dd>{generation.options.duration === -1 ? "自动" : generation.options.duration ? `${generation.options.duration} 秒` : "模型默认"}</dd></div>
+                <div><dt>生成音频</dt><dd>{generation.options.generateAudio === undefined ? "模型默认" : generation.options.generateAudio ? "是" : "否"}</dd></div>
+              </>}
+            </dl>
+          </section>
+
+          <section className={styles.generationDetailSection} aria-labelledby="generation-detail-prompt-title">
+            <h3 id="generation-detail-prompt-title">完整提示词</h3>
+            <p className={styles.generationDetailPrompt}>{generation.prompt}</p>
+          </section>
+
+          {generation.mediaType === "video" && (references.length > 0 || legacyReferenceUrl) && (
+            <section className={styles.generationDetailSection} aria-labelledby="generation-detail-reference-title">
+              <h3 id="generation-detail-reference-title">参考图</h3>
+              <ul className={styles.generationDetailList}>
+                {references.map((reference, index) => (
+                  <li key={`${reference.assetId}:${reference.role}:${index}`}>
+                    <b>{VIDEO_REFERENCE_ROLE_LABELS[reference.role]}</b>
+                    <span>{referenceAssetName(reference.assetId)}</span>
+                  </li>
+                ))}
+                {legacyReferenceUrl && <li><b>{VIDEO_REFERENCE_ROLE_LABELS[legacyReferenceRole]}</b><span>{legacyReferenceUrl}</span></li>}
+              </ul>
+            </section>
+          )}
+
+          {generation.relations.length > 0 && (
+            <section className={styles.generationDetailSection} aria-labelledby="generation-detail-relation-title">
+              <h3 id="generation-detail-relation-title">提交时关联</h3>
+              <ul className={styles.generationDetailList}>
+                {generation.relations.map((relation, index) => (
+                  <li key={`${relation.targetType}:${relation.targetId}:${relation.relationType ?? "related"}:${index}`}>
+                    <b>{relationTypeLabel(relation.relationType || "related")}</b>
+                    <span>{relationTargetName(relation)}{relation.note ? ` · ${relation.note}` : ""}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          <section className={styles.generationDetailSection} aria-labelledby="generation-detail-status-title">
+            <h3 id="generation-detail-status-title">任务信息</h3>
+            <dl className={styles.generationDetailGrid}>
+              <div><dt>当前状态</dt><dd><span className={joinClassNames(styles.statusBadge, failed && styles.statusBadgeError)}>{generationStatusLabel(generation.status)}</span></dd></div>
+              <div><dt>流程阶段</dt><dd>{generationPhaseLabel(generation)}</dd></div>
+              <div><dt>尝试次数</dt><dd>{Math.max(1, generation.attemptCount)}</dd></div>
+              <div><dt>创建时间</dt><dd>{formatGenerationTimestamp(generation.createdAt)}</dd></div>
+              <div><dt>开始时间</dt><dd>{formatGenerationTimestamp(generation.startedAt)}</dd></div>
+              <div><dt>更新时间</dt><dd>{formatGenerationTimestamp(generation.updatedAt)}</dd></div>
+              {generation.completedAt && <div><dt>结束时间</dt><dd>{formatGenerationTimestamp(generation.completedAt)}</dd></div>}
+              <div className={styles.generationDetailWide}><dt>请求编号</dt><dd><code>{generation.clientRequestId}</code></dd></div>
+              {generation.providerTaskId && <div className={styles.generationDetailWide}><dt>官方任务编号</dt><dd><code>{generation.providerTaskId}</code></dd></div>}
+            </dl>
+            {generation.errorMessage && (
+              <div className={failed ? styles.generationError : styles.generationPendingNote}>
+                <b>{generation.errorMessage}</b>
+                {generation.errorCode && <code>{generation.errorCode}</code>}
+              </div>
+            )}
+          </section>
+        </div>
+        <footer className={styles.dialogFooter}>
+          <button type="button" className={styles.primaryButton} onClick={onClose}>关闭</button>
+        </footer>
+      </div>
+    </div>
   );
 }
 
@@ -708,6 +878,7 @@ export default function AssetManager({
     useState<RelationFilter>("all");
   const [dialog, setDialog] = useState<DialogMode>(null);
   const [editing, setEditing] = useState<ProjectAsset | null>(null);
+  const [viewingGenerationRequestId, setViewingGenerationRequestId] = useState<string | null>(null);
   const [previewingAssetId, setPreviewingAssetId] = useState<string | null>(null);
   const [previewTab, setPreviewTab] = useState<"preview" | "relations">("preview");
   const [previewRelations, setPreviewRelations] = useState<AssetRelationInput[]>([]);
@@ -733,6 +904,7 @@ export default function AssetManager({
   const processingGenerationIds = useRef<Set<string>>(new Set());
   const dismissingGenerationIds = useRef<Set<string>>(new Set());
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const generationDetailCloseRef = useRef<HTMLButtonElement>(null);
   const previewCloseRef = useRef<HTMLButtonElement>(null);
   const onAssetsChangeRef = useRef(onAssetsChange);
   useEffect(() => {
@@ -885,6 +1057,7 @@ export default function AssetManager({
       setCategoryFilter("all");
       setRelationFilter("all");
       setDialog(null);
+      setViewingGenerationRequestId(null);
       setCharacters([]);
       setModels([]);
       setGenerations([]);
@@ -956,6 +1129,20 @@ export default function AssetManager({
     addEventListener("keydown", listener);
     return () => removeEventListener("keydown", listener);
   }, [dialog, dirty, saving]);
+  useEffect(() => {
+    if (!viewingGenerationRequestId) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const timer = window.setTimeout(() => generationDetailCloseRef.current?.focus(), 0);
+    const listener = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setViewingGenerationRequestId(null);
+    };
+    window.addEventListener("keydown", listener);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", listener);
+      if (previouslyFocused?.isConnected) window.setTimeout(() => previouslyFocused.focus(), 0);
+    };
+  }, [viewingGenerationRequestId]);
   useEffect(() => {
     if (!previewingAssetId) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -1036,6 +1223,10 @@ export default function AssetManager({
     const history = candidates.filter((generation) => !active.includes(generation)).slice(0, 12);
     return [...active, ...history];
   }, [assets, generations]);
+  const viewingGeneration = useMemo(
+    () => generations.find((generation) => generation.clientRequestId === viewingGenerationRequestId) ?? null,
+    [generations, viewingGenerationRequestId],
+  );
   const previewingAsset = useMemo(
     () => assets.find((asset) => asset.id === previewingAssetId) ?? null,
     [assets, previewingAssetId],
@@ -1509,6 +1700,7 @@ export default function AssetManager({
   async function dismissGeneration(generation: AssetGenerationJob) {
     generationRequestSequence.current += 1;
     dismissingGenerationIds.current.add(generation.id);
+    if (viewingGenerationRequestId === generation.clientRequestId) setViewingGenerationRequestId(null);
     setGenerations((current) => current.filter((item) => item.id !== generation.id));
     if (generation.id.startsWith("local:")) {
       dismissingGenerationIds.current.delete(generation.id);
@@ -1693,6 +1885,7 @@ export default function AssetManager({
                     key={generation.id}
                     generation={generation}
                     processing={generation.status === "running"}
+                    onOpen={(generation) => setViewingGenerationRequestId(generation.clientRequestId)}
                     onRetry={retryGeneration}
                     onDismiss={(generation) => void dismissGeneration(generation)}
                   />
@@ -1925,6 +2118,16 @@ export default function AssetManager({
             </div>
           )}
         </>
+      )}
+      {viewingGeneration && (
+        <GenerationDetailsDialog
+          generation={viewingGeneration}
+          models={models}
+          assets={assets}
+          characters={characters}
+          closeButtonRef={generationDetailCloseRef}
+          onClose={() => setViewingGenerationRequestId(null)}
+        />
       )}
       {previewingAsset && (
         <div

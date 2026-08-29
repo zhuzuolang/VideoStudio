@@ -369,6 +369,87 @@ describe("AssetManager 审查项回归", () => {
     ).toBeVisible();
   });
 
+  test("失败生成卡可打开并查看完整的历史提交参数", async () => {
+    const prompt = "韩立立于乱星海上空，镜头缓慢环绕人物，远处群岛与雷云逐层显现，保持人物服饰和面部一致。";
+    const model = makeModel({
+      id: "seedance-mini",
+      name: "豆包 Seedance 2.0 Mini",
+      modelId: "doubao-seedance-2-0-mini-260615",
+      parameters: { capabilities: ["video-generation", "image-to-video"] },
+    });
+    const reference = makeAsset({ id: "ref-1", name: "乱星海参考图" });
+    const failedJob = makeGenerationJob({
+      id: "gen-video-details",
+      clientRequestId: "request-video-details",
+      modelId: model.id,
+      modelName: model.name,
+      mediaType: "video",
+      name: "韩立遨游乱星海",
+      category: "scene",
+      prompt,
+      aspectRatio: "16:9",
+      options: {
+        resolution: "720p",
+        duration: 8,
+        generateAudio: false,
+        referenceImages: [{ assetId: reference.id, role: "reference_image" }],
+      },
+      relations: [{
+        targetType: "character",
+        targetId: "character-1",
+        relationType: "references",
+        note: "保持角色一致性",
+      }],
+      status: "failed",
+      phase: "failed",
+      progress: 15,
+      attemptCount: 2,
+      errorCode: "VIDEO_SUBMISSION_STATE_UNKNOWN",
+      errorMessage: "视频任务提交状态无法确认。",
+      retryable: false,
+      canRun: false,
+      providerTaskId: "cgt-details-1",
+      startedAt: "2026-08-23T00:00:03.000Z",
+      completedAt: "2026-08-23T00:01:00.000Z",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [failedJob] });
+        if (url.endsWith("/assets")) return jsonResponse([reference]);
+        if (url.endsWith("/characters")) return jsonResponse([{ id: "character-1", name: "韩立" }]);
+        if (url === "/api/models") return jsonResponse([model]);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+
+    const openButton = await screen.findByRole("button", { name: "查看生成参数 韩立遨游乱星海" });
+    await user.click(openButton);
+
+    const dialog = screen.getByRole("dialog", { name: "韩立遨游乱星海" });
+    expect(within(dialog).getByText("豆包 Seedance 2.0 Mini")).toBeVisible();
+    expect(within(dialog).getByText(/doubao-seedance-2-0-mini-260615/)).toBeVisible();
+    expect(within(dialog).getByText(prompt)).toBeVisible();
+    expect(within(dialog).getByText("16:9")).toBeVisible();
+    expect(within(dialog).getByText("720p")).toBeVisible();
+    expect(within(dialog).getByText("8 秒")).toBeVisible();
+    expect(within(dialog).getByText("否")).toBeVisible();
+    expect(within(dialog).getByText("内容参考")).toBeVisible();
+    expect(within(dialog).getByText("乱星海参考图")).toBeVisible();
+    expect(within(dialog).getByText("参考")).toBeVisible();
+    expect(within(dialog).getByText("韩立 · 保持角色一致性")).toBeVisible();
+    expect(within(dialog).getByText("VIDEO_SUBMISSION_STATE_UNKNOWN")).toBeVisible();
+    expect(within(dialog).getByText("cgt-details-1")).toBeVisible();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "韩立遨游乱星海" })).toBeNull());
+    await waitFor(() => expect(openButton).toHaveFocus());
+  });
+
   test("视频卡片展示官方离散状态，并把临时查询故障保留为生成中提示", async () => {
     const submittingJob = makeGenerationJob({
       id: "gen-video-submitting",
