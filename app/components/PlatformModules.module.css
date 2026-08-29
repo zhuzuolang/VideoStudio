@@ -1594,6 +1594,14 @@
   object-fit: cover;
 }
 
+.assetPreview video {
+  transition: opacity 160ms ease;
+}
+
+.assetPreview video[data-first-frame-ready="false"] {
+  opacity: 0;
+}
+
 .assetPreview > svg {
   position: relative;
   z-index: 0;

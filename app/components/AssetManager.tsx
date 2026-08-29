@@ -53,6 +53,7 @@ import {
   type AssetRelationType,
 } from "@/lib/asset-relations";
 import { findSeedanceModelPreset } from "@/lib/seedance-model-presets";
+import AssetPreviewMedia from "./AssetPreviewMedia";
 import {
   apiRequest,
   PlatformApiError,
@@ -410,25 +411,16 @@ function isSafePreProviderRetry(generation: AssetGenerationJob): boolean {
     && SAFE_PRE_PROVIDER_RETRY_CODES.has(generation.errorCode || "");
 }
 
-function AssetPreview({ asset }: { asset: ProjectAsset }) {
+function AssetPreview({ asset, previewRevision }: { asset: ProjectAsset; previewRevision?: number }) {
   const Icon = MEDIA_META[asset.mediaType]?.icon ?? Package;
-  const imageSource =
-    asset.mediaType === "image"
-      ? asset.contentUrl || asset.thumbnailUrl || asset.sourceUrl
-      : asset.thumbnailUrl;
   return (
     <div className={styles.assetPreview}>
       <Icon size={30} aria-hidden="true" />
-      {imageSource && (
-        <img
-          key={imageSource}
-          src={imageSource}
-          alt={`${asset.name}预览`}
-          onError={(event) => {
-            event.currentTarget.style.display = "none";
-          }}
-        />
-      )}
+      <AssetPreviewMedia
+        key={`${asset.id}:${asset.updatedAt}:${previewRevision ?? 0}`}
+        asset={asset}
+        alt={`${asset.name}预览`}
+      />
       <span className={styles.typeBadge}>
         <Icon size={11} /> {MEDIA_META[asset.mediaType].label}
       </span>
@@ -2304,7 +2296,7 @@ export default function AssetManager({
             <div className={styles.assetGrid}>
               {visibleAssets.map((asset) => (
                 <article className={styles.assetCard} key={asset.id}>
-                  <AssetPreview asset={asset} />
+                  <AssetPreview asset={asset} previewRevision={refreshKey} />
                   <button
                     type="button"
                     className={styles.assetOpenButton}

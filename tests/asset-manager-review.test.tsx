@@ -310,7 +310,7 @@ describe("AssetManager 审查项回归", () => {
 
     const failedPreview = await screen.findByAltText("雨夜参考图预览");
     fireEvent.error(failedPreview);
-    expect(failedPreview).toHaveStyle({ display: "none" });
+    expect(screen.queryByAltText("雨夜参考图预览")).toBeNull();
 
     view.rerender(<AssetManager projectId="project-1" refreshKey={1} />);
     await waitFor(() =>
@@ -319,8 +319,7 @@ describe("AssetManager 审查项回归", () => {
         "https://example.test/good.png",
       ),
     );
-    const recoveredPreview = screen.getByAltText("雨夜参考图预览");
-    expect(recoveredPreview).not.toHaveStyle({ display: "none" });
+    expect(screen.getByAltText("雨夜参考图预览")).toBeVisible();
 
     await user.click(
       screen.getByRole("button", { name: "删除资产 雨夜参考图" }),
@@ -332,6 +331,51 @@ describe("AssetManager 审查项回归", () => {
       screen.getByRole("button", { name: "编辑资产 雨夜参考图" }),
     ).toBeDisabled();
     resolveDelete?.(jsonResponse(null));
+  });
+
+  test("刷新资产列表后会重试同一地址的视频首帧", async () => {
+    const videoAsset = makeAsset({
+      id: "video-1",
+      name: "海面追逐",
+      mediaType: "video",
+      category: "final",
+      contentUrl: "/api/projects/project-1/assets/video-1/content",
+      sourceUrl: null,
+      thumbnailUrl: null,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [] });
+        if (url.endsWith("/assets")) return jsonResponse([videoAsset]);
+        if (url.endsWith("/characters") || url === "/api/models") return jsonResponse([]);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const view = render(<AssetManager projectId="project-1" refreshKey={0} />);
+
+    expect(await screen.findByRole("heading", { name: "海面追逐" })).toBeVisible();
+    const firstVideo = view.container.querySelector("video");
+    expect(firstVideo).not.toBeNull();
+    await waitFor(() => expect(firstVideo).toHaveAttribute(
+      "src",
+      "/api/projects/project-1/assets/video-1/content",
+    ));
+    fireEvent.error(firstVideo as HTMLVideoElement);
+    await waitFor(() => expect(view.container.querySelector("video")).toBeNull());
+
+    view.rerender(<AssetManager projectId="project-1" refreshKey={1} />);
+    let retriedVideo: HTMLVideoElement | null = null;
+    await waitFor(() => {
+      retriedVideo = view.container.querySelector("video");
+      expect(retriedVideo).not.toBeNull();
+      expect(retriedVideo).not.toBe(firstVideo);
+    });
+    await waitFor(() => expect(retriedVideo).toHaveAttribute(
+      "src",
+      "/api/projects/project-1/assets/video-1/content",
+    ));
   });
 
   test("AI 创建仅展示真正支持生成资产的模型", async () => {

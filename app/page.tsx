@@ -1,7 +1,5 @@
 "use client";
 
-/* eslint-disable @next/next/no-img-element -- project assets can use authenticated or user-configured URLs. */
-
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CSSProperties,
@@ -46,6 +44,7 @@ import {
 } from "lucide-react";
 import AgentStudio from "./components/AgentStudio";
 import AssetManager from "./components/AssetManager";
+import AssetPreviewMedia from "./components/AssetPreviewMedia";
 import ModelCenter from "./components/ModelCenter";
 import StageAgentPanel, { type StageAgentStage } from "./components/StageAgentPanel";
 import { apiRequest } from "./components/platform-client";
@@ -722,11 +721,11 @@ function BreakdownView({ scripts }: { scripts: ProjectScript[] }) {
   );
 }
 
-function ShotsView({ scripts, assets, onAssets }: { scripts: ProjectScript[]; assets: ProjectAsset[]; onAssets: () => void }) {
+function ShotsView({ scripts, assets, onAssets, previewRevision }: { scripts: ProjectScript[]; assets: ProjectAsset[]; onAssets: () => void; previewRevision: number }) {
   const visualAssets = assets.filter((asset) => ["image", "video", "model3d"].includes(asset.mediaType) || asset.category === "scene");
   const scenes = scripts.flatMap((script) => script.scenes as SceneRecord[]);
   const icons: Record<string, LucideIcon> = { image: ImageIcon, video: Video, model3d: Layers3, scene: Clapperboard };
-  return <div className="view-stack"><section className="previz-bar"><div className="play-button"><Clapperboard size={18} /></div><div><span className="section-kicker">PREVIS SOURCES</span><h2>{scenes.length} 场剧本 · {visualAssets.length} 项视觉资产</h2></div><div className="previz-time"><b>{visualAssets.length}</b><span>可用素材</span></div><div className="previz-line"><i style={{ width: `${Math.min(100, visualAssets.length * 18)}%` }} /></div><button className="quiet-button" onClick={onAssets}><Plus size={15} /> 添加素材</button></section><section className="visual-source-grid">{visualAssets.map((asset) => { const visualKey = asset.category === "scene" ? "scene" : asset.mediaType; const Icon = icons[visualKey] ?? Boxes; const previewUrl = asset.thumbnailUrl || (asset.mediaType === "image" ? asset.contentUrl || asset.sourceUrl : null); return <article key={asset.id}><div className={`visual-source-preview type-${visualKey}`}>{previewUrl ? <img src={previewUrl} alt="" /> : <Icon size={28} />}<span>{asset.mediaType.toUpperCase()} · {asset.category}</span></div><div><b>{asset.name}</b><small>{asset.description || "暂无描述"}</small></div></article>; })}{visualAssets.length === 0 && <button className="add-character" onClick={onAssets}><Plus size={24} /><b>添加首个视觉资产</b><span>支持图片、视频、3D 模型和场景资产</span></button>}</section></div>;
+  return <div className="view-stack"><section className="previz-bar"><div className="play-button"><Clapperboard size={18} /></div><div><span className="section-kicker">PREVIS SOURCES</span><h2>{scenes.length} 场剧本 · {visualAssets.length} 项视觉资产</h2></div><div className="previz-time"><b>{visualAssets.length}</b><span>可用素材</span></div><div className="previz-line"><i style={{ width: `${Math.min(100, visualAssets.length * 18)}%` }} /></div><button className="quiet-button" onClick={onAssets}><Plus size={15} /> 添加素材</button></section><section className="visual-source-grid">{visualAssets.map((asset) => { const visualKey = asset.category === "scene" ? "scene" : asset.mediaType; const Icon = icons[visualKey] ?? Boxes; return <article key={asset.id}><div className={`visual-source-preview type-${visualKey}`}><Icon size={28} aria-hidden="true" /><AssetPreviewMedia key={`${asset.id}:${asset.updatedAt}:${previewRevision}`} asset={asset} preferThumbnail /><span>{asset.mediaType.toUpperCase()} · {asset.category}</span></div><div><b>{asset.name}</b><small>{asset.description || "暂无描述"}</small></div></article>; })}{visualAssets.length === 0 && <button className="add-character" onClick={onAssets}><Plus size={24} /><b>添加首个视觉资产</b><span>支持图片、视频、3D 模型和场景资产</span></button>}</section></div>;
 }
 
 function DeliveryView({ assets, runs, onAgent }: { assets: ProjectAsset[]; runs: AgentRun[]; onAgent: () => void }) {
@@ -1127,7 +1126,7 @@ export default function Home() {
             {activeView === "scripts" && <ScriptsView key={project.id} projectId={project.id} episodes={data.episodes as EpisodeRecord[]} scripts={data.scripts} onOpenAgent={() => navigate("agent")} onOpenEpisodes={() => navigate("story")} onScriptsChange={(scripts) => setData((current) => current?.project?.id === project.id ? { ...current, scripts } : current)} onSaved={async () => { if (!await loadWorkspace(project.id, true)) throw new Error("剧本列表刷新失败"); }} />}
             {activeView === "breakdown" && <BreakdownView scripts={data.scripts} />}
             {activeView === "assets" && <AssetManager key={project.id} refreshKey={refreshKey} projectId={project.id} projectName={project.name} onAssetsChange={(assets) => setData((current) => current?.project?.id === project.id ? { ...current, assets } : current)} />}
-            {activeView === "shots" && <ShotsView scripts={data.scripts} assets={data.assets} onAssets={() => navigate("assets")} />}
+            {activeView === "shots" && <ShotsView scripts={data.scripts} assets={data.assets} onAssets={() => navigate("assets")} previewRevision={refreshKey} />}
             {activeView === "agent" && <AgentStudio key={project.id} refreshKey={refreshKey} initialRunId={selectedAgentRunId ?? undefined} projectId={project.id} projectName={project.name} onOpenModels={() => navigate("models")} onRunComplete={(run) => setData((current) => current?.project?.id === project.id && run.projectId === project.id ? { ...current, agentRuns: [run, ...current.agentRuns.filter((item) => item.id !== run.id)] } : current)} />}
             {activeView === "delivery" && <DeliveryView assets={data.assets} runs={data.agentRuns} onAgent={() => navigate("agent")} />}
             {activeView === "models" && <ModelCenter refreshKey={refreshKey} onModelsChange={(models: AiModel[]) => setData((current) => current ? { ...current, models } : current)} />}

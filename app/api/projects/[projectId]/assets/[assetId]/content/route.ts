@@ -27,7 +27,7 @@ export async function GET(request: Request, context: RouteContext<{ projectId: s
   try {
     const { projectId, assetId } = await context.params; const { db, identity } = await apiContext(request);
     await requireOwnedProject(db, projectId, identity.userId);
-    const asset = await db.prepare(`SELECT name, mime_type AS mimeType, storage_key AS storageKey FROM assets WHERE id = ? AND project_id = ?`).bind(assetId, projectId).first<Record<string, unknown>>();
+    const asset = await db.prepare(`SELECT name, mime_type AS mimeType, size_bytes AS sizeBytes, storage_key AS storageKey FROM assets WHERE id = ? AND project_id = ?`).bind(assetId, projectId).first<Record<string, unknown>>();
     if (!asset) throw new ApiError(404, "ASSET_NOT_FOUND", "资产不存在。 ");
     if (!asset.storageKey) throw new ApiError(404, "ASSET_CONTENT_NOT_FOUND", "该资产没有已上传的文件。 ");
     const bucket = mediaBucket();
@@ -35,16 +35,21 @@ export async function GET(request: Request, context: RouteContext<{ projectId: s
     let range: { offset: number; length: number } | null = null;
     let totalSize: number | null = null;
     if (rangeHeader) {
-      const metadata = await bucket.head(String(asset.storageKey));
-      if (!metadata) throw new ApiError(404, "ASSET_CONTENT_NOT_FOUND", "资产文件不存在。 ");
-      totalSize = metadata.size;
-      range = parseByteRange(rangeHeader, metadata.size);
+      const recordedSize = Number(asset.sizeBytes);
+      if (Number.isSafeInteger(recordedSize) && recordedSize > 0) {
+        totalSize = recordedSize;
+      } else {
+        const metadata = await bucket.head(String(asset.storageKey));
+        if (!metadata) throw new ApiError(404, "ASSET_CONTENT_NOT_FOUND", "资产文件不存在。 ");
+        totalSize = metadata.size;
+      }
+      range = parseByteRange(rangeHeader, totalSize);
       if (!range) {
         return new Response(null, {
           status: 416,
           headers: {
             "Accept-Ranges": "bytes",
-            "Content-Range": `bytes */${metadata.size}`,
+            "Content-Range": `bytes */${totalSize}`,
             "Cache-Control": "private, max-age=300",
             "X-Content-Type-Options": "nosniff",
           },

@@ -2054,14 +2054,32 @@ button:disabled {
   background: linear-gradient(135deg, #8d785d, #383128);
 }
 
-.visual-source-preview img {
+.visual-source-preview img,
+.visual-source-preview video {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
+.visual-source-preview video {
+  transition: opacity 160ms ease;
+}
+
+.visual-source-preview video[data-first-frame-ready="false"] {
+  opacity: 0;
+}
+
+.visual-source-preview > svg {
+  position: relative;
+  z-index: 0;
+}
+
 .visual-source-preview span {
   position: absolute;
+  z-index: 2;
   top: 10px;
   left: 10px;
   padding: 4px 6px;
