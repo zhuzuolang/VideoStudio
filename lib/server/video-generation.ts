@@ -10,6 +10,8 @@ import { validateModelEndpoint, validatePublicHttpsUrl } from "./outbound";
 
 const MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const MAX_GENERATED_VIDEO_BYTES = 100 * 1024 * 1024;
+const TASK_CREATE_REQUEST_TIMEOUT_MS = 35_000;
+const MIN_TASK_CREATE_REQUEST_BUDGET_MS = 5_000;
 const TASK_STATUS_REQUEST_TIMEOUT_MS = 30_000;
 const CONNECTION_TEST_TIMEOUT_MS = 30_000;
 const VIDEO_DOWNLOAD_TIMEOUT_MS = 60_000;
@@ -271,6 +273,10 @@ export async function createVideoGenerationTask(
   model: Record<string, unknown>,
   input: VideoGenerationInput,
   fetchImpl: typeof fetch = fetch,
+  dispatchOptions: {
+    beforeDispatch?: () => Promise<void>;
+    deadlineAt?: number;
+  } = {},
 ): Promise<{ taskId: string }> {
   assertModelReady(model);
   const request = buildVideoGenerationRequest(model, input);
@@ -279,15 +285,33 @@ export async function createVideoGenerationTask(
   if (input.signal?.aborted) {
     throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期，未提交付费视频任务。");
   }
+  if (remainingTaskCreateRequestMs(dispatchOptions.deadlineAt) < MIN_TASK_CREATE_REQUEST_BUDGET_MS) {
+    throw new ApiError(
+      503,
+      "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
+      "参考图准备耗时过长，尚未提交付费视频任务，系统将安全重试。",
+    );
+  }
+  await dispatchOptions.beforeDispatch?.();
+  if (input.signal?.aborted) {
+    throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期，未提交付费视频任务。");
+  }
 
   let response: Response;
   try {
+    const requestTimeoutMs = remainingTaskCreateRequestMs(dispatchOptions.deadlineAt);
+    if (requestTimeoutMs <= 0) {
+      throw new DOMException("Video task submission deadline exceeded", "TimeoutError");
+    }
+    const requestSignal = input.signal
+      ? AbortSignal.any([input.signal, AbortSignal.timeout(requestTimeoutMs)])
+      : AbortSignal.timeout(requestTimeoutMs);
     response = await fetchImpl(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(request),
       redirect: "manual",
-      ...(input.signal ? { signal: input.signal } : {}),
+      signal: requestSignal,
     });
   } catch (error) {
     throw taskNetworkError(error, input.signal, "提交");
@@ -302,6 +326,11 @@ export async function createVideoGenerationTask(
       : "";
   if (!taskId) throw invalidTaskResponse("视频服务没有返回任务编号。");
   return { taskId };
+}
+
+function remainingTaskCreateRequestMs(deadlineAt: number | undefined): number {
+  if (deadlineAt === undefined) return TASK_CREATE_REQUEST_TIMEOUT_MS;
+  return Math.min(TASK_CREATE_REQUEST_TIMEOUT_MS, Math.floor(deadlineAt - Date.now()));
 }
 
 export async function getVideoGenerationTask(

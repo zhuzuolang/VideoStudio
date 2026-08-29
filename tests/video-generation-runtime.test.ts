@@ -13,6 +13,7 @@ vi.mock("@/lib/server/outbound", () => ({
 }));
 
 import { SEEDANCE_MODEL_PRESETS } from "@/lib/seedance-model-presets";
+import { ApiError } from "@/lib/server/api";
 import {
   buildVideoGenerationRequest,
   createVideoGenerationTask,
@@ -266,25 +267,157 @@ describe("异步任务创建和查询", () => {
     );
   });
 
-  test("创建任务不设置固定截止，只透传外部租约信号", async () => {
-    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
-    const controller = new AbortController();
-    const calls: RequestInit[] = [];
-    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      calls.push(init ?? {});
-      return new Response(JSON.stringify({ id: "cgt-slow-create" }), {
+  test("计费边界标记在网络发送前完成，标记失败则不请求供应商", async () => {
+    const order: string[] = [];
+    const fetchMock = vi.fn(async () => {
+      order.push("dispatch");
+      return new Response(JSON.stringify({ id: "cgt-created" }), {
         status: 200,
         headers: { "content-type": "application/json" },
+      });
+    });
+    const fetchImpl = fetchMock as unknown as typeof fetch;
+    const beforeDispatch = vi.fn(async () => {
+      order.push("mark");
+    });
+
+    await expect(createVideoGenerationTask(
+      configuredModel(1),
+      { prompt: "海边日落" },
+      fetchImpl,
+      { beforeDispatch },
+    )).resolves.toEqual({ taskId: "cgt-created" });
+    expect(order).toEqual(["mark", "dispatch"]);
+
+    const rejectedMarker = vi.fn(async () => {
+      throw new ApiError(409, "GENERATION_LEASE_LOST", "lease lost");
+    });
+    fetchMock.mockClear();
+    await expect(createVideoGenerationTask(
+      configuredModel(1),
+      { prompt: "海边日落" },
+      fetchImpl,
+      { beforeDispatch: rejectedMarker },
+    )).rejects.toMatchObject({ code: "GENERATION_LEASE_LOST" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("整体截止时间不足最小发送预算时在计费边界前安全退出", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const beforeDispatch = vi.fn(async () => undefined);
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: "should-not-exist" }))) as unknown as typeof fetch;
+
+    try {
+      await expect(createVideoGenerationTask(
+        configuredModel(1),
+        { prompt: "海边日落" },
+        fetchImpl,
+        { beforeDispatch, deadlineAt: 5_999 },
+      )).rejects.toMatchObject({
+        status: 503,
+        code: "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
+      });
+      expect(beforeDispatch).not.toHaveBeenCalled();
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("供应商发送超时取 35 秒上限与整体剩余时间中的较小值", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const timeoutController = new AbortController();
+    timeoutSpy.mockReturnValue(timeoutController.signal);
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: "cgt-created" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+
+    try {
+      await expect(createVideoGenerationTask(
+        configuredModel(1),
+        { prompt: "海边日落" },
+        fetchImpl,
+        { deadlineAt: 21_000 },
+      )).resolves.toEqual({ taskId: "cgt-created" });
+      expect(timeoutSpy).toHaveBeenCalledWith(20_000);
+
+      timeoutSpy.mockClear();
+      await expect(createVideoGenerationTask(
+        configuredModel(1),
+        { prompt: "海边日落" },
+        fetchImpl,
+        { deadlineAt: 60_000 },
+      )).resolves.toEqual({ taskId: "cgt-created" });
+      expect(timeoutSpy).toHaveBeenCalledWith(35_000);
+    } finally {
+      timeoutSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  test("创建任务把 35 秒截止与外部租约信号组合，并把超时映射为安全的未知提交状态", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const timeoutController = new AbortController();
+    timeoutSpy.mockReturnValue(timeoutController.signal);
+    const leaseController = new AbortController();
+    const timeoutError = new Error("timed out");
+    timeoutError.name = "TimeoutError";
+    let requestSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener("abort", () => reject(timeoutError), { once: true });
       });
     }) as unknown as typeof fetch;
 
     try {
-      await expect(createVideoGenerationTask(configuredModel(3), {
+      const creating = createVideoGenerationTask(configuredModel(3), {
         prompt: "多参考图视频",
-        signal: controller.signal,
-      }, fetchImpl)).resolves.toEqual({ taskId: "cgt-slow-create" });
-      expect(calls[0].signal).toBe(controller.signal);
-      expect(timeoutSpy).not.toHaveBeenCalled();
+        signal: leaseController.signal,
+      }, fetchImpl);
+      await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+
+      expect(timeoutSpy).toHaveBeenCalledWith(35_000);
+      expect(requestSignal).toBeDefined();
+      expect(requestSignal).not.toBe(timeoutController.signal);
+      expect(requestSignal).not.toBe(leaseController.signal);
+
+      timeoutController.abort();
+      await expect(creating).rejects.toMatchObject({
+        code: "VIDEO_MODEL_TIMEOUT",
+        message: expect.stringContaining("任务可能已被服务商受理"),
+      });
+      expect(leaseController.signal.aborted).toBe(false);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  test("创建任务等待响应时丢失租约仍优先映射为 GENERATION_LEASE_LOST", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const timeoutController = new AbortController();
+    timeoutSpy.mockReturnValue(timeoutController.signal);
+    const leaseController = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal | undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      const creating = createVideoGenerationTask(configuredModel(3), {
+        prompt: "多参考图视频",
+        signal: leaseController.signal,
+      }, fetchImpl);
+      await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+
+      leaseController.abort(new DOMException("lease lost", "AbortError"));
+      await expect(creating).rejects.toMatchObject({ code: "GENERATION_LEASE_LOST" });
+      expect(timeoutController.signal.aborted).toBe(false);
     } finally {
       timeoutSpy.mockRestore();
     }
@@ -332,9 +465,10 @@ describe("异步任务创建和查询", () => {
       expect.objectContaining({ method: "GET", redirect: "manual" }),
     );
     expect(querySignal).not.toBe(controller.signal);
-    expect(querySignal?.aborted).toBe(false);
+    const activeQuerySignal = querySignal as unknown as AbortSignal;
+    expect(activeQuerySignal.aborted).toBe(false);
     controller.abort();
-    expect(querySignal?.aborted).toBe(true);
+    expect(activeQuerySignal.aborted).toBe(true);
   });
 
   test("查询失败任务时保留经过清洗的供应商错误", async () => {

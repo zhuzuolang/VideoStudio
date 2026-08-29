@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   getStorageKey: vi.fn(),
   setStorageKey: vi.fn(),
   persistFailure: vi.fn(),
+  markSubmissionStarted: vi.fn(),
   persistProviderTask: vi.fn(),
   releaseForPolling: vi.fn(),
   generationFailure: vi.fn(() => ({ code: "IMAGE_PROCESSING_FAILED", message: "图片生成处理发生内部错误，请稍后重试。", retryable: true })),
@@ -57,7 +58,10 @@ const fakeDb = {
 vi.mock("@/lib/server/context", () => ({
   apiContext: vi.fn(async () => ({ db: fakeDb, identity: { userId: "user-1" } })),
 }));
-vi.mock("@/lib/server/runtime", () => ({ mediaBucket: () => ({ put: mocks.put, delete: mocks.delete }) }));
+vi.mock("@/lib/server/runtime", () => ({
+  mediaBucket: () => ({ put: mocks.put, delete: mocks.delete }),
+  imageTransformationBinding: () => undefined,
+}));
 vi.mock("@/lib/server/image-generation", () => ({
   generateImageWithModel: mocks.generate,
   modelSupportsImageGeneration: mocks.supportsImages,
@@ -92,6 +96,7 @@ vi.mock("@/lib/server/asset-generation-jobs", () => ({
   getGenerationStorageKey: mocks.getStorageKey,
   setGenerationStorageKey: mocks.setStorageKey,
   persistGenerationFailure: mocks.persistFailure,
+  markGenerationProviderSubmissionStarted: mocks.markSubmissionStarted,
   persistGenerationProviderTask: mocks.persistProviderTask,
   releaseGenerationForPolling: mocks.releaseForPolling,
   generationFailure: mocks.generationFailure,
@@ -146,7 +151,11 @@ beforeEach(() => {
     sourceUrl: null,
     revisedPrompt: null,
   });
-  mocks.createVideoTask.mockResolvedValue({ taskId: "cgt-created" });
+  mocks.createVideoTask.mockImplementation(async (...args: unknown[]) => {
+    const dispatchOptions = args[3] as { beforeDispatch?: () => Promise<void> } | undefined;
+    await dispatchOptions?.beforeDispatch?.();
+    return { taskId: "cgt-created" };
+  });
   mocks.resolveReferenceAssets.mockResolvedValue([]);
   mocks.getVideoTask.mockResolvedValue({
     status: "succeeded",
@@ -318,6 +327,15 @@ test("确认承担重复计费风险后可重新提交状态不确定的视频�
 
   expect(response.status).toBe(202);
   expect(mocks.createVideoTask).toHaveBeenCalledOnce();
+  expect(mocks.createVideoTask).toHaveBeenCalledWith(
+    expect.any(Object),
+    expect.any(Object),
+    fetch,
+    expect.objectContaining({
+      deadlineAt: expect.any(Number),
+      beforeDispatch: expect.any(Function),
+    }),
+  );
   expect(mocks.getVideoTask).not.toHaveBeenCalled();
   const retryClaim = prepared.find((item) => item.sql.includes("status = 'running'") && item.sql.includes("status = 'failed'"));
   expect(retryClaim?.sql).toContain("? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3");
@@ -412,6 +430,7 @@ test("视频首次执行按序解析项目参考图，只创建一次供应商�
     expect.objectContaining({ put: mocks.put }),
     "project-1",
     referenceImages,
+    undefined,
   );
   expect(mocks.buildVideoRequest).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
     prompt: "电影感角色设定",
@@ -421,6 +440,13 @@ test("视频首次执行按序解析项目参考图，只创建一次供应商�
     referenceImages: resolvedReferenceImages,
   }));
   expect(mocks.createVideoTask).toHaveBeenCalledOnce();
+  expect(mocks.markSubmissionStarted).toHaveBeenCalledWith(
+    fakeDb,
+    "gen-1",
+    expect.stringMatching(/^lease_/),
+  );
+  expect(mocks.markSubmissionStarted.mock.invocationCallOrder[0])
+    .toBeLessThan(mocks.persistProviderTask.mock.invocationCallOrder[0]);
   expect(mocks.persistProviderTask).toHaveBeenCalledWith(
     fakeDb,
     "gen-1",

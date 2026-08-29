@@ -370,6 +370,16 @@ describe("AssetManager 审查项回归", () => {
   });
 
   test("视频卡片展示官方离散状态，并把临时查询故障保留为生成中提示", async () => {
+    const submittingJob = makeGenerationJob({
+      id: "gen-video-submitting",
+      mediaType: "video",
+      name: "正在提交任务",
+      status: "running",
+      phase: "model",
+      progress: 15,
+      providerTaskId: null,
+      canRun: false,
+    });
     const queuedJob = makeGenerationJob({
       id: "gen-video-queued",
       mediaType: "video",
@@ -409,13 +419,22 @@ describe("AssetManager 审查项回归", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [queuedJob, delayedJob, resumableJob] });
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [submittingJob, queuedJob, delayedJob, resumableJob] });
         if (url.endsWith("/assets") || url.endsWith("/characters") || url === "/api/models") return jsonResponse([]);
         throw new Error(`unexpected request: ${url}`);
       }),
     );
 
     render(<AssetManager projectId="project-1" />);
+
+    const submittingCard = (await screen.findByRole("heading", { name: "正在提交任务" })).closest("article");
+    expect(submittingCard).not.toBeNull();
+    expect(within(submittingCard as HTMLElement).getByText("正在提交官方视频任务")).toBeVisible();
+    const submissionProgress = within(submittingCard as HTMLElement).getByRole("progressbar", { name: "官方视频任务提交状态" });
+    expect(submissionProgress).not.toHaveAttribute("aria-valuenow");
+    expect(submissionProgress).toHaveAttribute("aria-valuetext", "正在提交官方视频任务");
+    expect(within(submittingCard as HTMLElement).getByText("提交中")).toBeVisible();
+    expect(within(submittingCard as HTMLElement).queryByText("持续查询")).toBeNull();
 
     const queuedCard = (await screen.findByRole("heading", { name: "官方排队任务" })).closest("article");
     expect(queuedCard).not.toBeNull();
@@ -433,20 +452,24 @@ describe("AssetManager 审查项回归", () => {
     expect(screen.getByRole("button", { name: "继续处理 等待入库任务" })).toBeVisible();
   });
 
-  test("不可自动重试的视频失败卡在风险确认后重新提交", async () => {
+  test("提交状态不明的视频失败卡提供核对信息，并只在风险确认后重新提交", async () => {
+    const startedAt = "2026-08-23T00:02:00.000Z";
     let serverJob = makeGenerationJob({
       id: "gen-video-failed",
       mediaType: "video",
-      name: "超时视频任务",
+      name: "提交状态不明任务",
+      modelName: "豆包 Seedance 2.5",
       status: "failed",
       phase: "failed",
       progress: 15,
       attemptCount: 1,
       providerTaskId: null,
-      errorCode: "VIDEO_MODEL_TIMEOUT",
-      errorMessage: "视频服务提交结果无法确认。",
+      errorCode: "VIDEO_SUBMISSION_STATE_UNKNOWN",
+      errorMessage: "视频任务提交状态无法确认。",
       retryable: false,
       canRun: false,
+      startedAt,
+      updatedAt: "2026-08-23T00:10:00.000Z",
     });
     let retryBody: Record<string, unknown> | null = null;
     let runnerCalls = 0;
@@ -483,9 +506,13 @@ describe("AssetManager 审查项回归", () => {
 
     render(<AssetManager projectId="project-1" />);
 
-    const retryButton = await screen.findByRole("button", { name: "确认后重试 超时视频任务" });
+    const retryButton = await screen.findByRole("button", { name: "核对后重新提交 提交状态不明任务" });
+    const failedCard = screen.getByRole("heading", { name: "提交状态不明任务" }).closest("article");
+    expect(failedCard).not.toBeNull();
+    expect(within(failedCard as HTMLElement).getByText(/控制台核对信息：豆包 Seedance 2.5 · 提交时间/)).toBeVisible();
+    expect((failedCard as HTMLElement).querySelector("time[datetime]")).toHaveAttribute("datetime", startedAt);
     await user.click(retryButton);
-    expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("重复任务"));
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("仅当控制台没有匹配任务时才重新提交"));
     expect(runnerCalls).toBe(0);
 
     await user.click(retryButton);

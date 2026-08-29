@@ -2,6 +2,7 @@ import { expect, test, vi } from "vitest";
 import { ApiError } from "@/lib/server/api";
 import {
   generationFailure,
+  markGenerationProviderSubmissionStarted,
   releaseGenerationForPolling,
   serializeAssetGeneration,
 } from "@/lib/server/asset-generation-jobs";
@@ -147,6 +148,70 @@ test("视频轮询尊重 nextPollAt，丢失供应商任务号时不自动重提
     mediaType: "video",
     optionsJson: "{}",
     providerTaskId: null,
+    progress: 10,
+    nextPollAt: null,
+  }).canRun).toBe(true);
+  expect(serializeAssetGeneration({
+    ...baseRow,
+    mediaType: "video",
+    optionsJson: "{}",
+    providerTaskId: null,
+    progress: 15,
     nextPollAt: null,
   }).canRun).toBe(false);
+});
+
+test("只在有效租约下标记可能计费，并原子续租五分钟", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-29T10:00:00.000Z"));
+  const statements: Array<{ sql: string; values: unknown[] }> = [];
+  const db = {
+    prepare: vi.fn((sql: string) => {
+      const statement = {
+        sql,
+        values: [] as unknown[],
+        bind(...values: unknown[]) {
+          this.values = values;
+          statements.push({ sql, values });
+          return this;
+        },
+        run: vi.fn(async () => ({ meta: { changes: 1 } })),
+      };
+      return statement;
+    }),
+  } as unknown as D1Database;
+
+  try {
+    await markGenerationProviderSubmissionStarted(db, "gen-1", "lease-1");
+
+    expect(statements).toHaveLength(1);
+    expect(statements[0].sql).toContain("SET progress = 15, lease_expires_at = ?");
+    expect(statements[0].sql).toContain("provider_task_id IS NULL AND lease_expires_at > ?");
+    expect(statements[0].values).toEqual([
+      "2026-08-29T10:05:00.000Z",
+      "2026-08-29T10:00:00.000Z",
+      "gen-1",
+      "lease-1",
+      "2026-08-29T10:00:00.000Z",
+    ]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("提交边界遇到已过期租约时不改变状态并拒绝发送", async () => {
+  const run = vi.fn(async () => ({ meta: { changes: 0 } }));
+  const db = {
+    prepare: vi.fn(() => ({
+      bind: vi.fn(() => ({ run })),
+    })),
+  } as unknown as D1Database;
+
+  await expect(markGenerationProviderSubmissionStarted(db, "gen-1", "expired-lease"))
+    .rejects.toMatchObject({
+      status: 409,
+      code: "GENERATION_LEASE_LOST",
+      message: expect.stringContaining("尚未提交付费视频任务"),
+    });
+  expect(run).toHaveBeenCalledOnce();
 });

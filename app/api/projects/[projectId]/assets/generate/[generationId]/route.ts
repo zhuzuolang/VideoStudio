@@ -3,6 +3,7 @@ import {
   generationFailure,
   getAssetGeneration,
   getGenerationStorageKey,
+  markGenerationProviderSubmissionStarted,
   persistGenerationFailure,
   persistGenerationProviderTask,
   releaseGenerationForPolling,
@@ -13,7 +14,7 @@ import {
 import { safeFilename } from "@/lib/server/assets";
 import { apiContext, type RouteContext } from "@/lib/server/context";
 import { generateImageWithModel } from "@/lib/server/image-generation";
-import { mediaBucket } from "@/lib/server/runtime";
+import { imageTransformationBinding, mediaBucket } from "@/lib/server/runtime";
 import { prepareGeneratedAssetRelationStatements, requireOwnedModel, requireOwnedProject, validateAssetRelationTargets } from "@/lib/server/store";
 import {
   buildVideoGenerationRequest,
@@ -26,6 +27,7 @@ import { parseVideoReferenceAssets, resolveVideoReferenceAssets } from "@/lib/se
 export const dynamic = "force-dynamic";
 const LEASE_MS = 300_000;
 const LEASE_HEARTBEAT_MS = 45_000;
+const VIDEO_SUBMISSION_OVERALL_DEADLINE_MS = 40_000;
 const VIDEO_POLL_AFTER_MS = 5_000;
 const VIDEO_POLL_RETRY_AFTER_MS = 15_000;
 const TRANSIENT_VIDEO_TASK_QUERY_CODES = new Set([
@@ -99,6 +101,7 @@ export async function DELETE(request: Request, context: RouteContext<{ projectId
 }
 
 export async function POST(request: Request, context: RouteContext<{ projectId: string; generationId: string }>): Promise<Response> {
+  const videoSubmissionDeadlineAt = Date.now() + VIDEO_SUBMISSION_OVERALL_DEADLINE_MS;
   let generationId = "";
   let leaseToken = "";
   let db: D1Database | null = null;
@@ -150,7 +153,8 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     const leaseExpiresAt = new Date(Date.now() + LEASE_MS).toISOString();
     const claim = generation.status === "failed"
       ? await db.prepare(`UPDATE asset_generation_jobs SET
-          status = 'running', phase = 'model', progress = 15,
+          status = 'running', phase = 'model',
+          progress = CASE WHEN media_type = 'video' AND (provider_task_id IS NULL OR ? = 1) THEN 10 ELSE 15 END,
           attempt_count = attempt_count + CASE WHEN provider_task_id IS NULL OR ? = 1 THEN 1 ELSE 0 END,
           provider_task_id = CASE WHEN ? = 1 THEN NULL ELSE provider_task_id END,
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
@@ -158,6 +162,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
         WHERE id = ? AND project_id = ? AND owner_id = ? AND status = 'failed'
           AND dismissed_at IS NULL AND (? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3)`)
         .bind(
+          restartProviderTask ? 1 : 0,
           restartProviderTask ? 1 : 0,
           restartProviderTask ? 1 : 0,
           leaseToken,
@@ -170,7 +175,9 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
           confirmedRetry ? 1 : 0,
         ).run()
       : await db.prepare(`UPDATE asset_generation_jobs SET
-          status = 'running', phase = 'model', progress = MAX(progress, 15),
+          status = 'running', phase = 'model',
+          progress = CASE WHEN media_type = 'video' AND provider_task_id IS NULL
+            THEN MAX(progress, 10) ELSE MAX(progress, 15) END,
           attempt_count = attempt_count + CASE WHEN provider_task_id IS NULL THEN 1 ELSE 0 END,
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
           next_poll_at = NULL, updated_at = ?, started_at = COALESCE(started_at, ?), completed_at = NULL
@@ -179,7 +186,8 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
           AND (status = 'queued' OR (status = 'running'
             AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
             AND (next_poll_at IS NULL OR next_poll_at <= ?)
-            AND NOT (media_type = 'video' AND provider_task_id IS NULL AND attempt_count > 0)))`)
+            AND NOT (media_type = 'video' AND provider_task_id IS NULL
+              AND attempt_count > 0 AND progress >= 15)))`)
         .bind(leaseToken, leaseExpiresAt, now, now, generationId, projectId, identity.userId, now, now).run();
 
     if (!claim.meta.changes) {
@@ -229,6 +237,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
           bucket,
           projectId,
           parseVideoReferenceAssets(generation.options.referenceImages),
+          imageTransformationBinding(),
         );
         const videoInput = {
           prompt: generation.prompt,
@@ -243,8 +252,13 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
         };
         // Validate the model-specific profile before marking the call as potentially billable.
         buildVideoGenerationRequest(model, videoInput);
-        providerInvoked = true;
-        const created = await createVideoGenerationTask(model, videoInput);
+        const created = await createVideoGenerationTask(model, videoInput, fetch, {
+          deadlineAt: videoSubmissionDeadlineAt,
+          beforeDispatch: async () => {
+            await markGenerationProviderSubmissionStarted(db as D1Database, generationId, leaseToken);
+            providerInvoked = true;
+          },
+        });
         resolvedProviderTaskId = created.taskId;
         await persistGenerationProviderTask(
           db,

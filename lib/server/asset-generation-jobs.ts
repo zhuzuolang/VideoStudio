@@ -24,6 +24,7 @@ export type GenerationFailure = {
 export function serializeAssetGeneration(row: Record<string, unknown>): AssetGenerationJob {
   const status = String(row.status) as AssetGenerationJob["status"];
   const attemptCount = Math.max(0, Number(row.attemptCount) || 0);
+  const progress = Math.max(0, Math.min(100, Number(row.progress) || 0));
   const leaseExpiresAt = typeof row.leaseExpiresAt === "string" ? row.leaseExpiresAt : null;
   const leaseExpired = !leaseExpiresAt || Date.parse(leaseExpiresAt) <= Date.now();
   const nextPollAt = typeof row.nextPollAt === "string" ? row.nextPollAt : null;
@@ -34,6 +35,7 @@ export function serializeAssetGeneration(row: Record<string, unknown>): AssetGen
     && status === "running"
     && attemptCount > 0
     && !providerTaskId
+    && progress >= 15
     && leaseExpired;
   return {
     id: String(row.id),
@@ -53,7 +55,7 @@ export function serializeAssetGeneration(row: Record<string, unknown>): AssetGen
     relations: parseJson<AssetRelationInput[]>(row.relationsJson, []),
     status,
     phase: String(row.phase) as AssetGenerationJob["phase"],
-    progress: Math.max(0, Math.min(100, Number(row.progress) || 0)),
+    progress,
     attemptCount,
     errorCode: typeof row.errorCode === "string" ? row.errorCode : null,
     errorMessage: typeof row.errorMessage === "string" ? row.errorMessage : null,
@@ -80,12 +82,13 @@ export async function listAssetGenerations(
   await db.prepare(`UPDATE asset_generation_jobs SET
       status = 'failed', phase = 'failed', retryable = 0,
       error_code = 'VIDEO_SUBMISSION_STATE_UNKNOWN',
-      error_message = '视频任务提交状态无法确认。为避免重复计费，系统不会自动重提；请先在服务商控制台核对后再新建任务。',
+      error_message = '视频任务提交状态无法确认。为避免重复计费，系统不会自动重提；请先在服务商控制台核对，仅在没有对应任务时重新提交。',
       lease_token = NULL, lease_expires_at = NULL, next_poll_at = NULL,
       updated_at = ?, completed_at = ?
     WHERE project_id = ? AND owner_id = ? AND dismissed_at IS NULL
       AND media_type = 'video' AND status = 'running' AND provider_task_id IS NULL
-      AND attempt_count > 0 AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`)
+      AND attempt_count > 0 AND progress >= 15
+      AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`)
     .bind(now, now, projectId, ownerId, now)
     .run();
   await db.prepare(`UPDATE asset_generation_jobs SET
@@ -146,6 +149,24 @@ export async function persistGenerationProviderTask(
     .bind(providerTaskId, new Date(Date.now() + pollAfterMs).toISOString(), now, generationId, leaseToken)
     .run();
   if (!result.meta.changes) throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期，供应商任务编号未能保存。 ");
+}
+
+export async function markGenerationProviderSubmissionStarted(
+  db: D1Database,
+  generationId: string,
+  leaseToken: string,
+): Promise<void> {
+  const now = nowIso();
+  const renewedLeaseExpiresAt = new Date(Date.now() + 300_000).toISOString();
+  const result = await db.prepare(`UPDATE asset_generation_jobs
+    SET progress = 15, lease_expires_at = ?, updated_at = ?
+    WHERE id = ? AND media_type = 'video' AND status = 'running'
+      AND lease_token = ? AND provider_task_id IS NULL AND lease_expires_at > ?`)
+    .bind(renewedLeaseExpiresAt, now, generationId, leaseToken, now)
+    .run();
+  if (!result.meta.changes) {
+    throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期，尚未提交付费视频任务。");
+  }
 }
 
 export async function releaseGenerationForPolling(
@@ -302,6 +323,7 @@ export function generationFailure(
       "VIDEO_REFERENCE_ASSET_NOT_READY",
       "VIDEO_REFERENCE_ASSET_CONTENT_MISSING",
       "VIDEO_REFERENCE_ASSET_TYPE_UNSUPPORTED",
+      "VIDEO_REFERENCE_OPTIMIZATION_UNSUPPORTED",
       "TOO_MANY_VIDEO_REFERENCES",
       "DUPLICATE_VIDEO_REFERENCE_ROLE",
       "VIDEO_AUDIO_UNSUPPORTED",
@@ -321,6 +343,7 @@ export function generationFailure(
       "INVALID_VIDEO_CONTENT_TYPE",
       "INVALID_VIDEO_BYTES",
       "VIDEO_RESPONSE_TOO_LARGE",
+      "VIDEO_REFERENCE_PAYLOAD_TOO_LARGE",
       "VIDEO_SUBMISSION_STATE_UNKNOWN",
       "INVALID_ASSET_RELATION",
       "GENERATION_LEASE_LOST",

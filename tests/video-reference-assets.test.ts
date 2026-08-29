@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+  MAX_INLINE_VIDEO_REFERENCE_BYTES,
   MAX_LOCAL_VIDEO_REFERENCE_BYTES,
   MAX_TOTAL_LOCAL_VIDEO_REFERENCE_BYTES,
   MAX_VIDEO_REFERENCE_IMAGES,
@@ -7,6 +8,7 @@ import {
   resolveVideoReferenceAssets,
   validateVideoReferenceAssets,
 } from "@/lib/server/video-reference-assets";
+import type { ImageTransformationBinding } from "@/lib/server/runtime";
 
 vi.mock("@/lib/server/store", () => ({
   allRows: async (statement: { all: () => Promise<{ results?: Record<string, unknown>[] }> }) => {
@@ -58,6 +60,46 @@ function readyImageRow(
     sourceUrl: null,
     status: "ready",
     ...overrides,
+  };
+}
+
+function r2ImageObject(bytes: Uint8Array, contentType = "image/png") {
+  return {
+    size: bytes.byteLength,
+    httpEtag: `etag-${bytes.byteLength}`,
+    httpMetadata: { contentType },
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    }),
+    arrayBuffer: async () => bytes.slice().buffer,
+  };
+}
+
+function imagesReturning(outputs: Uint8Array[]) {
+  const transforms: ReturnType<typeof vi.fn>[] = [];
+  const outputCalls: ReturnType<typeof vi.fn>[] = [];
+  let index = 0;
+  const input = vi.fn(() => {
+    const bytes = outputs[index++] ?? outputs.at(-1) ?? new Uint8Array();
+    const output = vi.fn(async () => ({
+      response: () => new Response(bytes.slice().buffer as ArrayBuffer, {
+        status: 200,
+        headers: { "content-type": "image/webp" },
+      }),
+    }));
+    const transform = vi.fn(() => ({ output }));
+    transforms.push(transform);
+    outputCalls.push(output);
+    return { transform };
+  });
+  return {
+    binding: { input } as unknown as ImageTransformationBinding,
+    input,
+    transforms,
+    outputCalls,
   };
 }
 
@@ -146,6 +188,255 @@ describe("resolveVideoReferenceAssets", () => {
       { url: "data:image/png;base64,iVBORw==", role: "reference_image" },
     ]);
     expect(get).toHaveBeenCalledOnce();
+  });
+
+  test("keeps local references unchanged when their aggregate fits the inline budget", async () => {
+    const dominantBytes = new Uint8Array(1_400_000).fill(0x31);
+    const companionBytes = new Uint8Array(300_000).fill(0x32);
+    expect(dominantBytes.byteLength).toBeGreaterThan(MAX_INLINE_VIDEO_REFERENCE_BYTES / 2);
+    expect(dominantBytes.byteLength + companionBytes.byteLength).toBeLessThan(MAX_INLINE_VIDEO_REFERENCE_BYTES);
+    const { db } = databaseReturning([
+      readyImageRow("asset-dominant", { sizeBytes: dominantBytes.byteLength }),
+      readyImageRow("asset-companion", { sizeBytes: companionBytes.byteLength }),
+    ]);
+    const get = vi.fn(async (key: string) => {
+      if (key.endsWith("asset-dominant.png")) return r2ImageObject(dominantBytes);
+      if (key.endsWith("asset-companion.png")) return r2ImageObject(companionBytes);
+      throw new Error(`unexpected R2 key: ${key}`);
+    });
+
+    const resolved = await resolveVideoReferenceAssets(
+      db,
+      { get } as unknown as R2Bucket,
+      "project-1",
+      [
+        { assetId: "asset-dominant", role: "reference_image" },
+        { assetId: "asset-companion", role: "reference_image" },
+      ],
+    );
+
+    expect(resolved.map((reference) => reference.url.slice(0, reference.url.indexOf(",") + 1))).toEqual([
+      "data:image/png;base64,",
+      "data:image/png;base64,",
+    ]);
+    expect(resolved[0].url.split(",")[1]).toHaveLength(4 * Math.ceil(dominantBytes.byteLength / 3));
+    expect(resolved[1].url.split(",")[1]).toHaveLength(4 * Math.ceil(companionBytes.byteLength / 3));
+  });
+
+  test("water-fills the inline budget so small references stay intact and larger ones use the remainder", async () => {
+    const smallBytes = new Uint8Array(128 * 1024).fill(0x31);
+    const largeBytes = new Uint8Array(MAX_INLINE_VIDEO_REFERENCE_BYTES).fill(0x32);
+    const largeBudget = MAX_INLINE_VIDEO_REFERENCE_BYTES - smallBytes.byteLength;
+    const compactedBytes = new Uint8Array(largeBudget).fill(0x33);
+    const { db } = databaseReturning([
+      readyImageRow("asset-small", { sizeBytes: smallBytes.byteLength }),
+      readyImageRow("asset-large", { sizeBytes: largeBytes.byteLength }),
+    ]);
+    const get = vi.fn(async (key: string) => {
+      if (key.endsWith("asset-small.png")) return r2ImageObject(smallBytes);
+      if (key.endsWith("asset-large.png")) return r2ImageObject(largeBytes);
+      throw new Error(`unexpected R2 key: ${key}`);
+    });
+    const images = imagesReturning([compactedBytes]);
+
+    const resolved = await resolveVideoReferenceAssets(
+      db,
+      { get } as unknown as R2Bucket,
+      "project-1",
+      [
+        { assetId: "asset-small", role: "reference_image" },
+        { assetId: "asset-large", role: "reference_image" },
+      ],
+      images.binding,
+    );
+
+    expect(resolved[0].url).toMatch(/^data:image\/png;base64,/);
+    expect(resolved[1].url).toMatch(/^data:image\/webp;base64,/);
+    expect(resolved[0].url.split(",")[1]).toHaveLength(4 * Math.ceil(smallBytes.byteLength / 3));
+    expect(resolved[1].url.split(",")[1]).toHaveLength(4 * Math.ceil(compactedBytes.byteLength / 3));
+    expect(images.input).toHaveBeenCalledOnce();
+  });
+
+  test("compacts large local references to WebP while preserving order, roles, and remote URL bypass", async () => {
+    const firstBytes = new Uint8Array(2_360_000).fill(0x31);
+    const lastBytes = new Uint8Array(1_950_000).fill(0x32);
+    const remoteUrl = "https://images.example.test/reference.webp?signature=kept";
+    const rows = [
+      readyImageRow("asset-last", { sizeBytes: lastBytes.byteLength }),
+      readyImageRow("asset-remote", {
+        mimeType: "image/webp",
+        sizeBytes: null,
+        storageKey: null,
+        sourceUrl: remoteUrl,
+      }),
+      readyImageRow("asset-first", { sizeBytes: firstBytes.byteLength }),
+    ];
+    const { db } = databaseReturning(rows);
+    const get = vi.fn(async (key: string) => {
+      if (key.endsWith("asset-first.png")) return r2ImageObject(firstBytes);
+      if (key.endsWith("asset-last.png")) return r2ImageObject(lastBytes);
+      throw new Error(`unexpected R2 key: ${key}`);
+    });
+    const images = imagesReturning([
+      new Uint8Array([0x52, 0x49, 0x46, 0x46]),
+      new Uint8Array([0x57, 0x45, 0x42, 0x50]),
+    ]);
+
+    const resolved = await resolveVideoReferenceAssets(
+      db,
+      { get } as unknown as R2Bucket,
+      "project-1",
+      [
+        { assetId: "asset-first", role: "reference_image" },
+        { assetId: "asset-remote", role: "reference_image" },
+        { assetId: "asset-last", role: "reference_image" },
+      ],
+      images.binding,
+    );
+
+    expect(resolved).toEqual([
+      { url: "data:image/webp;base64,UklGRg==", role: "reference_image" },
+      { url: remoteUrl, role: "reference_image" },
+      { url: "data:image/webp;base64,V0VCUA==", role: "reference_image" },
+    ]);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(images.input).toHaveBeenCalledTimes(2);
+    expect(images.transforms).toHaveLength(2);
+    for (const transform of images.transforms) {
+      expect(transform).toHaveBeenCalledWith(expect.objectContaining({
+        width: expect.any(Number),
+        height: expect.any(Number),
+        fit: "scale-down",
+      }));
+      const transformOptions = transform.mock.calls[0][0] as { width: number; height: number };
+      expect(transformOptions.height).toBe(transformOptions.width);
+    }
+    for (const output of images.outputCalls) {
+      expect(output).toHaveBeenCalledWith(expect.objectContaining({
+        format: "image/webp",
+        quality: expect.any(Number),
+      }));
+    }
+    const encodedBytes = resolved.reduce((total, item) => total + item.url.length, 0);
+    expect(encodedBytes).toBeLessThan((firstBytes.byteLength + lastBytes.byteLength) / 10);
+  });
+
+  test("fails before provider submission when a large local reference has no Images binding", async () => {
+    const bytes = new Uint8Array(2_360_000).fill(0x31);
+    const { db } = databaseReturning([
+      readyImageRow("asset-large", { sizeBytes: bytes.byteLength }),
+    ]);
+    const bucket = {
+      get: vi.fn(async () => r2ImageObject(bytes)),
+    } as unknown as R2Bucket;
+
+    await expect(resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [{ assetId: "asset-large", role: "reference_image" }],
+    )).rejects.toMatchObject({
+      status: 503,
+      code: "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+    });
+  });
+
+  test("fails before provider submission when an available Images binding cannot compact a local reference", async () => {
+    const bytes = new Uint8Array(2_360_000).fill(0x31);
+    const { db } = databaseReturning([
+      readyImageRow("asset-large", { sizeBytes: bytes.byteLength }),
+    ]);
+    const bucket = {
+      get: vi.fn(async () => r2ImageObject(bytes)),
+    } as unknown as R2Bucket;
+    const images = {
+      input: vi.fn(() => ({
+        transform: vi.fn(() => ({
+          output: vi.fn(async () => {
+            throw new Error("Images binding unavailable");
+          }),
+        })),
+      })),
+    };
+
+    await expect(resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [{ assetId: "asset-large", role: "reference_image" }],
+      images as unknown as ImageTransformationBinding,
+    )).rejects.toMatchObject({
+      status: 503,
+      code: "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
+    });
+  });
+
+  test("rejects an Images result that remains above the inline payload budget after all attempts", async () => {
+    const original = new Uint8Array(2_360_000).fill(0x31);
+    const oversized = new Uint8Array(MAX_LOCAL_VIDEO_REFERENCE_BYTES + 1).fill(0x32);
+    const { db } = databaseReturning([
+      readyImageRow("asset-large", { sizeBytes: original.byteLength }),
+    ]);
+    const bucket = {
+      get: vi.fn(async () => r2ImageObject(original)),
+    } as unknown as R2Bucket;
+    const images = imagesReturning([oversized]);
+
+    await expect(resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [{ assetId: "asset-large", role: "reference_image" }],
+      images.binding,
+    )).rejects.toMatchObject({
+      status: 413,
+      code: "VIDEO_REFERENCE_PAYLOAD_TOO_LARGE",
+    });
+    expect(images.input).toHaveBeenCalledTimes(4);
+  });
+
+  test("streams transformed output and cancels an attempt as soon as it crosses the byte budget", async () => {
+    const original = new Uint8Array(2_360_000).fill(0x31);
+    const { db } = databaseReturning([
+      readyImageRow("asset-large", { sizeBytes: original.byteLength }),
+    ]);
+    const bucket = {
+      get: vi.fn(async () => r2ImageObject(original)),
+    } as unknown as R2Bucket;
+    const cancelOversized = vi.fn();
+    const oversizedResponse = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1_100_000).fill(0x32));
+        controller.enqueue(new Uint8Array(1_100_000).fill(0x32));
+      },
+      cancel: cancelOversized,
+    }), { status: 200 });
+    const acceptedBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46]);
+    const responses = [
+      oversizedResponse,
+      new Response(acceptedBytes.slice().buffer as ArrayBuffer, { status: 200 }),
+    ];
+    let responseIndex = 0;
+    const input = vi.fn(() => {
+      const response = responses[responseIndex++];
+      return {
+        transform: vi.fn(() => ({
+          output: vi.fn(async () => ({ response: () => response })),
+        })),
+      };
+    });
+
+    await expect(resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [{ assetId: "asset-large", role: "reference_image" }],
+      { input } as unknown as ImageTransformationBinding,
+    )).resolves.toEqual([
+      { url: "data:image/webp;base64,UklGRg==", role: "reference_image" },
+    ]);
+    expect(input).toHaveBeenCalledTimes(2);
+    expect(cancelOversized).toHaveBeenCalledOnce();
   });
 });
 

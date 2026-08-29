@@ -339,7 +339,7 @@ function generationRetryConfirmation(generation: AssetGenerationJob): string {
   if (generation.mediaType === "video"
     && !generation.providerTaskId
     && UNCERTAIN_VIDEO_SUBMISSION_CODES.has(generation.errorCode || "")) {
-    return "上次视频任务是否已被服务商受理无法确认。再次提交可能创建重复任务并产生额外费用。请先在火山方舟控制台核对；仍要重试吗？";
+    return "上次视频任务是否已被服务商受理无法确认。请先在火山方舟控制台核对，仅当控制台没有匹配任务时才重新提交。重新提交会创建新的官方视频任务并可能产生额外费用。确认没有匹配任务并继续吗？";
   }
   if (generation.mediaType === "video"
     && generation.providerTaskId
@@ -439,20 +439,30 @@ function GenerationCard({
 }) {
   const failed = generation.status === "failed";
   const active = generation.status === "submitting" || generation.status === "queued" || generation.status === "running";
-  const pollingOfficialVideo = active && generation.mediaType === "video" && generation.phase === "model";
+  const officialVideoModelPhase = active && generation.mediaType === "video" && generation.phase === "model";
+  const submittingOfficialVideo = officialVideoModelPhase && !generation.providerTaskId;
+  const pollingOfficialVideo = officialVideoModelPhase && Boolean(generation.providerTaskId);
+  const indeterminateOfficialVideo = submittingOfficialVideo || pollingOfficialVideo;
   const submissionUnconfirmed = generation.status === "submitting"
     && generation.errorCode === "GENERATION_SUBMISSION_UNCONFIRMED";
   const resumableVideoTask = failed && canResumeExistingVideoTask(generation);
   const retryAvailable = submissionUnconfirmed || (failed && !generation.id.startsWith("local:"));
   const confirmedRetryRequired = failed && !generation.retryable
     && !resumableVideoTask && !generation.id.startsWith("local:");
+  const uncertainVideoSubmission = confirmedRetryRequired
+    && generation.mediaType === "video"
+    && !generation.providerTaskId
+    && UNCERTAIN_VIDEO_SUBMISSION_CODES.has(generation.errorCode || "");
+  const submissionTime = generation.startedAt || generation.createdAt || generation.updatedAt;
   const retryActionLabel = submissionUnconfirmed
     ? "重新确认任务"
     : resumableVideoTask
       ? "继续处理"
-      : confirmedRetryRequired
-        ? "确认后重试"
-        : "重试生成";
+      : uncertainVideoSubmission
+        ? "核对后重新提交"
+        : confirmedRetryRequired
+          ? "确认后重试"
+          : "重试生成";
   const MediaIcon = generation.mediaType === "video" ? Video : ImageIcon;
   const mediaLabel = generation.mediaType === "video" ? "视频" : "图片";
   return (
@@ -481,16 +491,16 @@ function GenerationCard({
           <span>{generationPhaseLabel(generation)}</span>
         </div>
         <div
-          className={joinClassNames(styles.generationProgress, pollingOfficialVideo && styles.generationProgressIndeterminate)}
+          className={joinClassNames(styles.generationProgress, indeterminateOfficialVideo && styles.generationProgressIndeterminate)}
           role="progressbar"
-          aria-label={pollingOfficialVideo ? "官方视频任务状态" : "生成流程进度"}
-          aria-valuemin={pollingOfficialVideo ? undefined : 0}
-          aria-valuemax={pollingOfficialVideo ? undefined : 100}
-          aria-valuenow={pollingOfficialVideo ? undefined : generation.progress}
-          aria-valuetext={pollingOfficialVideo ? generationPhaseLabel(generation) : undefined}
+          aria-label={submittingOfficialVideo ? "官方视频任务提交状态" : pollingOfficialVideo ? "官方视频任务状态" : "生成流程进度"}
+          aria-valuemin={indeterminateOfficialVideo ? undefined : 0}
+          aria-valuemax={indeterminateOfficialVideo ? undefined : 100}
+          aria-valuenow={indeterminateOfficialVideo ? undefined : generation.progress}
+          aria-valuetext={indeterminateOfficialVideo ? generationPhaseLabel(generation) : undefined}
         >
-          <div><i style={pollingOfficialVideo ? undefined : { width: `${generation.progress}%` }} /></div>
-          <span>{pollingOfficialVideo ? "持续查询" : `${generation.progress}%`}</span>
+          <div><i style={indeterminateOfficialVideo ? undefined : { width: `${generation.progress}%` }} /></div>
+          <span>{submittingOfficialVideo ? "提交中" : pollingOfficialVideo ? "持续查询" : `${generation.progress}%`}</span>
         </div>
         {active && generation.errorMessage && (
           <div className={styles.generationPendingNote} role="status">
@@ -500,6 +510,12 @@ function GenerationCard({
         {failed && generation.errorMessage && (
           <div className={styles.generationError} role="alert">
             <b>{generation.errorMessage}</b>
+            {uncertainVideoSubmission && (
+              <small>
+                控制台核对信息：{generation.modelName} · 提交时间{" "}
+                <time dateTime={submissionTime}>{formatCompactDate(submissionTime)}</time>
+              </small>
+            )}
             {generation.errorCode && <code>{generation.errorCode}</code>}
           </div>
         )}

@@ -4,9 +4,20 @@ import { ApiError } from "./api";
 export type RuntimeBindings = {
   DB?: D1Database;
   MEDIA?: R2Bucket;
+  IMAGES?: ImageTransformationBinding;
   MODEL_KEY_ENCRYPTION_SECRET?: string;
   ALLOW_LOCAL_MODEL_ENDPOINTS?: string;
   MODEL_HTTP_ENDPOINT_ALLOWLIST?: string;
+};
+
+export type ImageTransformationBinding = {
+  input(stream: ReadableStream): {
+    transform(options: Record<string, unknown>): {
+      output(options: { format: string; quality?: number; anim?: boolean }): Promise<{
+        response(): Response;
+      }>;
+    };
+  };
 };
 
 export function bindings(): RuntimeBindings {
@@ -27,6 +38,10 @@ export function mediaBucket(): R2Bucket {
     throw new ApiError(503, "MEDIA_STORAGE_NOT_CONFIGURED", "媒体存储尚未配置，请联系站点管理员。 ");
   }
   return bucket;
+}
+
+export function imageTransformationBinding(): ImageTransformationBinding | undefined {
+  return bindings().IMAGES;
 }
 
 export function encryptionSecret(): string {
