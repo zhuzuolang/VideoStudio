@@ -94,7 +94,14 @@ describe("Seedance 官方价格预设", () => {
     expect(v25).toMatchObject({ resolutions: ["480p", "720p", "1080p"], maxDuration: 30, supportsAutoDuration: true, supportsGenerateAudio: true, maxReferenceImages: 30 });
     expect(v20).toMatchObject({ resolutions: ["480p", "720p", "1080p", "4k"], maxDuration: 15, supportsAutoDuration: true, maxReferenceImages: 9 });
     expect(fast).toMatchObject({ resolutions: ["480p", "720p"], maxDuration: 15, supportsAutoDuration: true, supportsGenerateAudio: true, maxReferenceImages: 9 });
-    expect(mini).toMatchObject({ resolutions: ["480p", "720p"], maxDuration: 15, supportsAutoDuration: true, supportsGenerateAudio: true, maxReferenceImages: 9 });
+    expect(mini).toMatchObject({
+      resolutions: ["480p", "720p"],
+      maxDuration: 15,
+      supportsAutoDuration: true,
+      supportsGenerateAudio: false,
+      defaultGenerateAudio: false,
+      maxReferenceImages: 9,
+    });
   });
 });
 
@@ -180,17 +187,22 @@ describe("Seedance 请求 profile", () => {
     })).toThrowError(expect.objectContaining({ code: "INVALID_VIDEO_RESOLUTION" }));
   });
 
-  test("2.0 与 Mini 支持 -1 智能时长和有声输出", () => {
+  test("2.0 支持有声输出，Mini 支持智能时长但省略不兼容的音频参数", () => {
     expect(buildVideoGenerationRequest(configuredModel(1), {
       prompt: "自动时长",
       duration: -1,
-    })).toMatchObject({ duration: -1 });
-    const miniRequest = buildVideoGenerationRequest(configuredModel(3), {
-      prompt: "有声智能短片",
-      duration: -1,
       generateAudio: true,
+    })).toMatchObject({ duration: -1, generate_audio: true });
+    const miniRequest = buildVideoGenerationRequest(configuredModel(3), {
+      prompt: "智能短片",
+      duration: -1,
     });
-    expect(miniRequest).toMatchObject({ duration: -1, generate_audio: true });
+    expect(miniRequest).toMatchObject({ duration: -1 });
+    expect(miniRequest).not.toHaveProperty("generate_audio");
+    expect(() => buildVideoGenerationRequest(configuredModel(3), {
+      prompt: "Mini 有声短片",
+      generateAudio: true,
+    })).toThrowError(expect.objectContaining({ code: "VIDEO_AUDIO_UNSUPPORTED" }));
   });
 
   test("拒绝重复首帧和不安全的参考图协议", () => {
