@@ -109,6 +109,26 @@ describe("allowlisted direct HTTP transport", () => {
     await expect(response.text()).resolves.toBe("Unauthorized");
   });
 
+  test("aborts an in-flight response and closes the socket", async () => {
+    const controller = new AbortController();
+    const socket = {
+      readable: new ReadableStream<Uint8Array>({ pull() { return new Promise(() => undefined); } }),
+      writable: new WritableStream<Uint8Array>(),
+      opened: Promise.resolve({ remoteAddress: "8.163.6.244:8317" }),
+      close: vi.fn(async () => undefined),
+    };
+    const pending = directHttpFetch("http://8.163.6.244:8317/v1/chat/completions", {
+      method: "POST",
+      body: "{}",
+      signal: controller.signal,
+    }, { connect: () => socket, maxResponseBytes: 1024, timeoutMs: 1_000 });
+
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(socket.close).toHaveBeenCalled();
+  });
+
   test("rejects truncated and ambiguous response framing", async () => {
     const truncated = fakeSocket(["HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nshort"]);
     await expect(directHttpFetch("http://8.163.6.244:8317/v1/chat/completions", {

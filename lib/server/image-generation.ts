@@ -1,6 +1,7 @@
 import { ApiError, parseJson } from "./api";
 import { decryptApiKey } from "./crypto";
-import { validateModelEndpoint, validatePublicHttpsUrl } from "./outbound";
+import { directHttpFetch } from "./direct-http";
+import { allowlistedPublicHttpModelEndpoint, validateModelEndpoint, validatePublicHttpsUrl } from "./outbound";
 
 const MAX_PROVIDER_RESPONSE_BYTES = 18 * 1024 * 1024;
 export const MAX_GENERATED_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -133,7 +134,7 @@ export async function generateImageWithModel(
   let response: Response;
   if (input.signal?.aborted) throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期。");
   try {
-    response = await fetchImpl(endpoint, {
+    const requestInit: RequestInit = {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(buildImageGenerationRequest(model, { ...input, prompt, size })),
@@ -141,9 +142,16 @@ export async function generateImageWithModel(
       signal: input.signal
         ? AbortSignal.any([input.signal, AbortSignal.timeout(IMAGE_TIMEOUT_MS)])
         : AbortSignal.timeout(IMAGE_TIMEOUT_MS),
-    });
+    };
+    response = allowlistedPublicHttpModelEndpoint(endpoint)
+      ? await directHttpFetch(endpoint, requestInit, {
+          timeoutMs: IMAGE_TIMEOUT_MS,
+          maxResponseBytes: MAX_PROVIDER_RESPONSE_BYTES,
+        })
+      : await fetchImpl(endpoint, requestInit);
   } catch (error) {
     if (input.signal?.aborted) throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期，已停止等待模型结果。");
+    if (error instanceof ApiError) throw error;
     const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
     throw new ApiError(502, timedOut ? "IMAGE_MODEL_TIMEOUT" : "IMAGE_MODEL_NETWORK_ERROR", timedOut
       ? "图像服务在 120 秒内未完成请求。该请求可能已被服务商受理，请核对调用记录后再决定是否重试。"

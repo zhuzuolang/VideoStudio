@@ -62,6 +62,7 @@ export async function directHttpFetch(
   const connect = options.connect ?? cloudflareSocketConnect;
   const timeoutMs = options.timeoutMs ?? 120_000;
   const maxResponseBytes = options.maxResponseBytes ?? 2 * 1024 * 1024;
+  const signal = init.signal ?? undefined;
   const deadline = Date.now() + timeoutMs;
   let socket: DirectSocket | undefined;
   const closeSocket = () => {
@@ -77,13 +78,14 @@ export async function directHttpFetch(
       )),
       deadline,
       closeSocket,
+      signal,
     );
-    await withinDeadline(socket.opened, deadline, closeSocket);
+    await withinDeadline(socket.opened, deadline, closeSocket, signal);
 
     const writer = socket.writable.getWriter();
     try {
-      await withinDeadline(writer.write(encoder.encode(requestLines.join("\r\n"))), deadline, closeSocket);
-      if (body.byteLength > 0) await withinDeadline(writer.write(body), deadline, closeSocket);
+      await withinDeadline(writer.write(encoder.encode(requestLines.join("\r\n"))), deadline, closeSocket, signal);
+      if (body.byteLength > 0) await withinDeadline(writer.write(body), deadline, closeSocket, signal);
       // Do not half-close the TCP write side after the declared request body.
       // Some OpenAI-compatible gateways treat a client FIN as cancellation and
       // return 499 (and some runtimes may also truncate the readable side).
@@ -94,7 +96,7 @@ export async function directHttpFetch(
       catch { /* A timed-out write may still own the lock until the socket closes. */ }
     }
 
-    return await readHttpResponse(socket, deadline, maxResponseBytes);
+    return await readHttpResponse(socket, deadline, maxResponseBytes, signal);
   } finally {
     if (socket) await socket.close().catch(() => undefined);
   }
@@ -112,6 +114,7 @@ async function readHttpResponse(
   socket: DirectSocket,
   deadline: number,
   maxResponseBytes: number,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const reader = socket.readable.getReader();
   const rawLimit = MAX_RESPONSE_HEADER_BYTES + maxResponseBytes + MAX_CHUNK_FRAMING_BYTES;
@@ -124,9 +127,9 @@ async function readHttpResponse(
       const { done, value } = await withinDeadline(reader.read(), deadline, () => {
         try { void socket.close().catch(() => undefined); }
         catch { /* Closing is best-effort while a read is pending. */ }
-      });
+      }, signal);
       if (done) break;
-      if (value.byteLength > rawLimit - total) throw responseTooLarge();
+      if (value.byteLength > rawLimit - total) throw responseTooLarge(maxResponseBytes);
       raw.set(value, total);
       total += value.byteLength;
 
@@ -139,7 +142,7 @@ async function readHttpResponse(
         if (headerEnd > MAX_RESPONSE_HEADER_BYTES) throw invalidHttpResponse();
         parsedHead = parseResponseHead(raw.subarray(0, headerEnd));
         const declared = parsedHead.contentLength;
-        if (declared !== null && declared > maxResponseBytes) throw responseTooLarge();
+        if (declared !== null && declared > maxResponseBytes) throw responseTooLarge(maxResponseBytes);
       }
 
       const bodyBytes = total - headerEnd - 4;
@@ -148,7 +151,7 @@ async function readHttpResponse(
       } else if (parsedHead?.chunked) {
         if (decodeChunkedBody(raw.subarray(headerEnd + 4, total), maxResponseBytes) !== null) break;
       } else if (bodyBytes > maxResponseBytes) {
-        throw responseTooLarge();
+        throw responseTooLarge(maxResponseBytes);
       }
     }
   } finally {
@@ -167,7 +170,7 @@ async function readHttpResponse(
     if (framedBody.byteLength < parsedHead.contentLength) throw invalidHttpResponse();
     responseBody = framedBody.slice(0, parsedHead.contentLength);
   } else {
-    if (framedBody.byteLength > maxResponseBytes) throw responseTooLarge();
+    if (framedBody.byteLength > maxResponseBytes) throw responseTooLarge(maxResponseBytes);
     responseBody = framedBody.slice();
   }
 
@@ -240,7 +243,7 @@ function decodeChunkedBody(bytes: Uint8Array, maxResponseBytes: number): Uint8Ar
       return trailerEnd < 0 ? null : concatenate(chunks, total);
     }
 
-    if (size > maxResponseBytes - total) throw responseTooLarge();
+    if (size > maxResponseBytes - total) throw responseTooLarge(maxResponseBytes);
     if (bytes.byteLength < offset + size + 2) return null;
     if (bytes[offset + size] !== 13 || bytes[offset + size + 1] !== 10) throw invalidHttpResponse();
     chunks.push(bytes.slice(offset, offset + size));
@@ -284,23 +287,40 @@ function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 async function withinDeadline<T>(
   promise: Promise<T>,
   deadline: number,
-  onTimeout?: () => void,
+  onCancel?: () => void,
+  signal?: AbortSignal,
 ): Promise<T> {
+  if (signal?.aborted) {
+    onCancel?.();
+    throw abortedRequestError(signal);
+  }
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw timeoutError();
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let abortListener: (() => void) | undefined;
   try {
-    return await Promise.race([
+    const racers: Array<Promise<T>> = [
       promise,
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
-          onTimeout?.();
+          onCancel?.();
           reject(timeoutError());
         }, remaining);
       }),
-    ]);
+    ];
+    if (signal) {
+      racers.push(new Promise<never>((_, reject) => {
+        abortListener = () => {
+          onCancel?.();
+          reject(abortedRequestError(signal));
+        };
+        signal.addEventListener("abort", abortListener, { once: true });
+      }));
+    }
+    return await Promise.race(racers);
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
+    if (signal && abortListener) signal.removeEventListener("abort", abortListener);
   }
 }
 
@@ -310,10 +330,18 @@ function timeoutError(): Error {
   return error;
 }
 
+function abortedRequestError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error("Direct HTTP request aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 function invalidHttpResponse(): ApiError {
   return new ApiError(502, "INVALID_MODEL_RESPONSE", "模型服务返回了无效的 HTTP 响应。");
 }
 
-function responseTooLarge(): ApiError {
-  return new ApiError(502, "MODEL_RESPONSE_TOO_LARGE", "模型响应超过 2 MB 限制。");
+function responseTooLarge(maxResponseBytes: number): ApiError {
+  const limitMb = Math.max(1, Math.round(maxResponseBytes / 1024 / 1024));
+  return new ApiError(502, "MODEL_RESPONSE_TOO_LARGE", `模型响应超过 ${limitMb} MB 限制。`);
 }
