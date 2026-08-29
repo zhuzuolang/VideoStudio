@@ -233,7 +233,11 @@ export async function callConfiguredModel(
   try {
     response = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
       body: JSON.stringify(payload),
       redirect: "manual",
       signal: AbortSignal.timeout(120_000),
@@ -247,17 +251,16 @@ export async function callConfiguredModel(
   const raw = await readLimitedResponse(response, 2 * 1024 * 1024);
   let result: Record<string, unknown>;
   try { result = JSON.parse(raw) as Record<string, unknown>; }
-  catch { throw new ApiError(502, "INVALID_MODEL_RESPONSE", "模型服务返回了无法解析的响应。 "); }
-  if (!response.ok) {
-    const message = response.status === 401 || response.status === 403
-      ? "模型认证失败，请检查 API Key。"
-      : response.status === 404
-        ? "模型地址或模型 ID 无效。"
-        : response.status === 429
-          ? "模型服务正在限流或额度不足，请稍后重试。"
-          : `模型服务拒绝了请求（HTTP ${response.status}）。`;
-    throw new ApiError(502, "MODEL_REQUEST_REJECTED", message, { providerStatus: response.status });
+  catch {
+    if (!response.ok) throw modelRequestRejectedError(response.status);
+    throw new ApiError(
+      502,
+      "INVALID_MODEL_RESPONSE",
+      "模型服务返回了无法解析的响应。",
+      { providerStatus: response.status },
+    );
   }
+  if (!response.ok) throw modelRequestRejectedError(response.status);
   const choices = Array.isArray(result.choices) ? result.choices as Array<Record<string, unknown>> : [];
   const message = choices[0]?.message as Record<string, unknown> | undefined;
   const content = message?.content;
@@ -270,6 +273,17 @@ export async function callConfiguredModel(
     response: answer.trim(), usage,
     requestMeta: { endpointHost: new URL(endpoint).hostname, model: model.model_id, sourceCount: sources.length, mediaCount: mediaParts.length },
   };
+}
+
+function modelRequestRejectedError(status: number): ApiError {
+  const message = status === 401 || status === 403
+    ? "模型认证失败，请检查 API Key。"
+    : status === 404
+      ? "模型地址或模型 ID 无效。"
+      : status === 429
+        ? "模型服务正在限流或额度不足，请稍后重试。"
+        : `模型服务拒绝了请求（HTTP ${status}）。`;
+  return new ApiError(502, "MODEL_REQUEST_REJECTED", message, { providerStatus: status });
 }
 
 async function readLimitedResponse(response: Response, maxBytes: number): Promise<string> {
