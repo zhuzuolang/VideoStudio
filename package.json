@@ -20,8 +20,11 @@
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
+    "fflate": "0.8.2",
+    "jpeg-js": "0.4.4",
     "lucide-react": "^1.33.0",
     "next": "16.2.6",
+    "purejsimage": "0.17.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },

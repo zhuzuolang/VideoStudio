@@ -29,6 +29,12 @@ const mocks = vi.hoisted(() => ({
   persistProviderTask: vi.fn(),
   releaseForPolling: vi.fn(),
   generationFailure: vi.fn(() => ({ code: "IMAGE_PROCESSING_FAILED", message: "图片生成处理发生内部错误，请稍后重试。", retryable: true })),
+  isSafePreProviderRetryCode: vi.fn((code: unknown) => [
+    "VIDEO_PREPARATION_INTERRUPTED",
+    "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
+    "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+    "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
+  ].includes(String(code))),
   parseReferenceAssets: vi.fn((value: unknown) => value ?? []),
   validateReferenceProfile: vi.fn(),
   validateReferenceAssets: vi.fn(),
@@ -100,6 +106,7 @@ vi.mock("@/lib/server/asset-generation-jobs", () => ({
   persistGenerationProviderTask: mocks.persistProviderTask,
   releaseGenerationForPolling: mocks.releaseForPolling,
   generationFailure: mocks.generationFailure,
+  isSafePreProviderRetryCode: mocks.isSafePreProviderRetryCode,
 }));
 
 const generation = {
@@ -331,15 +338,12 @@ test("确认承担重复计费风险后可重新提交状态不确定的视频�
     expect.any(Object),
     expect.any(Object),
     fetch,
-    expect.objectContaining({
-      deadlineAt: expect.any(Number),
-      beforeDispatch: expect.any(Function),
-    }),
+    { beforeDispatch: expect.any(Function) },
   );
   expect(mocks.getVideoTask).not.toHaveBeenCalled();
   const retryClaim = prepared.find((item) => item.sql.includes("status = 'running'") && item.sql.includes("status = 'failed'"));
-  expect(retryClaim?.sql).toContain("? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3");
-  expect(retryClaim?.values.at(-1)).toBe(1);
+  expect(retryClaim?.sql).toContain("? = 1 OR ? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3");
+  expect(retryClaim?.values.slice(-2)).toEqual([1, 0]);
 });
 
 test("官方视频任务终止后，确认重试会清除旧任务号并创建新任务", async () => {
@@ -399,6 +403,111 @@ test("视频已生成但入库失败时复用原官方任务，不会重复创�
     expect.any(AbortSignal),
   );
   expect(mocks.downloadVideo).toHaveBeenCalledOnce();
+});
+
+test("参考图压缩预提交失败达到三次后仍可无需风险确认地重试", async () => {
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    status: "failed",
+    phase: "failed",
+    progress: 10,
+    attemptCount: 3,
+    retryable: false,
+    errorCode: "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+    errorMessage: "图片处理服务当前不可用。",
+    options: {
+      resolution: "720p",
+      duration: 8,
+      referenceImages: [{ assetId: "asset-large", role: "reference_image" }],
+    },
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true, confirmedRetry: false }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(202);
+  expect(mocks.createVideoTask).toHaveBeenCalledOnce();
+  expect(mocks.getVideoTask).not.toHaveBeenCalled();
+  const retryClaim = prepared.find((item) => item.sql.includes("status = 'running'") && item.sql.includes("status = 'failed'"));
+  expect(retryClaim?.values.slice(-2)).toEqual([0, 1]);
+});
+
+test("历史提交准备超时达到三次后仍可无需风险确认地重试", async () => {
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    status: "failed",
+    phase: "failed",
+    progress: 10,
+    attemptCount: 3,
+    retryable: false,
+    errorCode: "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
+    errorMessage: "参考图准备耗时过长，尚未提交付费视频任务。",
+    options: { resolution: "720p", duration: 8 },
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true, confirmedRetry: false }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(202);
+  expect(mocks.createVideoTask).toHaveBeenCalledOnce();
+  expect(mocks.getVideoTask).not.toHaveBeenCalled();
+  const retryClaim = prepared.find((item) => item.sql.includes("status = 'running'") && item.sql.includes("status = 'failed'"));
+  expect(retryClaim?.values.slice(-2)).toEqual([0, 1]);
+});
+
+test("参考图压缩预提交重试失败时不会越过供应商计费边界", async () => {
+  const preflightError = new ApiError(
+    503,
+    "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+    "图片处理服务当前不可用。",
+  );
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    status: "failed",
+    phase: "failed",
+    progress: 10,
+    attemptCount: 1,
+    retryable: true,
+    errorCode: preflightError.code,
+    errorMessage: preflightError.message,
+    options: {
+      resolution: "720p",
+      duration: 8,
+      referenceImages: [{ assetId: "asset-large", role: "reference_image" }],
+    },
+  });
+  mocks.resolveReferenceAssets.mockRejectedValueOnce(preflightError);
+  mocks.generationFailure.mockReturnValueOnce({
+    code: preflightError.code,
+    message: preflightError.message,
+    retryable: true,
+  });
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ retry: true, confirmedRetry: false }),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(503);
+  expect(mocks.generationFailure).toHaveBeenCalledWith(preflightError, false, "video");
+  expect(mocks.persistFailure).toHaveBeenCalledWith(
+    fakeDb,
+    "gen-1",
+    expect.stringMatching(/^lease_/),
+    expect.objectContaining({ code: preflightError.code, retryable: true }),
+  );
+  expect(mocks.markSubmissionStarted).not.toHaveBeenCalled();
+  expect(mocks.createVideoTask).not.toHaveBeenCalled();
 });
 
 test("视频首次执行按序解析项目参考图，只创建一次供应商任务并持久化任务号", async () => {

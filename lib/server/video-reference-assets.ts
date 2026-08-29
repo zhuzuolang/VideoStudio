@@ -4,6 +4,11 @@ import type {
 } from "../platform-types";
 import type { SeedanceVideoPreset } from "../seedance-model-presets";
 import { ApiError } from "./api";
+import {
+  ReferenceImageOptimizationInputError,
+  optimizeReferenceImageInWorker,
+  type ReferenceImageOptimizationAttempt,
+} from "./reference-image-optimizer";
 import type { ImageTransformationBinding } from "./runtime";
 import { allRows } from "./store";
 import type { VideoReferenceImageInput } from "./video-generation";
@@ -40,6 +45,14 @@ const OPTIMIZABLE_IMAGE_MIME_TYPES = new Set([
   "image/heic",
   "image/heif",
 ]);
+const WORKER_OPTIMIZABLE_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/bmp",
+]);
+
+type ReferenceImageFallbackOptimizer = typeof optimizeReferenceImageInWorker;
 
 type ReferenceAssetRow = {
   id: string;
@@ -52,12 +65,13 @@ type ReferenceAssetRow = {
   status: string;
 };
 
-type LoadedReference = {
+type PreparedReference = {
   kind: "local";
   name: string;
   role: VideoReferenceImageRole;
-  mimeType: string;
-  bytes: Uint8Array<ArrayBuffer>;
+  storageKey: string;
+  mimeTypeHint: string;
+  sizeBytes: number;
 } | {
   kind: "remote";
   role: VideoReferenceImageRole;
@@ -147,88 +161,136 @@ export async function resolveVideoReferenceAssets(
   projectId: string,
   references: readonly VideoReferenceAssetInput[],
   images?: ImageTransformationBinding,
+  fallbackOptimizer: ReferenceImageFallbackOptimizer = optimizeReferenceImageInWorker,
 ): Promise<VideoReferenceImageInput[]> {
   if (references.length === 0) return [];
   const rows = await loadReferenceAssetRows(db, projectId, references);
-  let declaredLocalBytes = 0;
-  let localBytes = 0;
-  const loaded = await mapWithConcurrency(rows, REFERENCE_IO_CONCURRENCY, async (row, index): Promise<LoadedReference> => {
+  const prepared = await mapWithConcurrency(rows, REFERENCE_IO_CONCURRENCY, async (row, index): Promise<PreparedReference> => {
     validateReferenceAssetRow(row);
     const role = references[index].role;
     if (!row.storageKey) {
       return { kind: "remote", url: row.sourceUrl as string, role };
     }
 
-    const object = await bucket.get(row.storageKey);
-    if (!object) {
-      throw new ApiError(409, "VIDEO_REFERENCE_ASSET_CONTENT_MISSING", `项目图片“${row.name}”的文件已不存在，请重新选择参考图。`);
+    let sizeBytes = Number(row.sizeBytes) || 0;
+    let mimeTypeHint = row.mimeType || "";
+    if (sizeBytes <= 0) {
+      const metadata = await bucket.head(row.storageKey);
+      if (!metadata) {
+        throw new ApiError(409, "VIDEO_REFERENCE_ASSET_CONTENT_MISSING", `项目图片“${row.name}”的文件已不存在，请重新选择参考图。`);
+      }
+      sizeBytes = metadata.size;
+      mimeTypeHint ||= metadata.httpMetadata?.contentType || "";
     }
-    if (object.size > MAX_LOCAL_VIDEO_REFERENCE_BYTES) {
+    if (sizeBytes > MAX_LOCAL_VIDEO_REFERENCE_BYTES) {
       throw new ApiError(413, "VIDEO_REFERENCE_ASSET_TOO_LARGE", `项目图片“${row.name}”超过 8 MB，无法作为视频参考图。`);
-    }
-    declaredLocalBytes += object.size;
-    if (declaredLocalBytes > MAX_TOTAL_LOCAL_VIDEO_REFERENCE_BYTES) {
-      throw new ApiError(413, "VIDEO_REFERENCE_ASSETS_TOO_LARGE", "所选项目图片的本地文件合计不能超过 24 MB。");
-    }
-    const buffer = await object.arrayBuffer();
-    if (buffer.byteLength > MAX_LOCAL_VIDEO_REFERENCE_BYTES) {
-      throw new ApiError(413, "VIDEO_REFERENCE_ASSET_TOO_LARGE", `项目图片“${row.name}”超过 8 MB，无法作为视频参考图。`);
-    }
-    localBytes += buffer.byteLength;
-    if (localBytes > MAX_TOTAL_LOCAL_VIDEO_REFERENCE_BYTES) {
-      throw new ApiError(413, "VIDEO_REFERENCE_ASSETS_TOO_LARGE", "所选项目图片的本地文件合计不能超过 24 MB。");
-    }
-    const mimeType = normalizedImageMimeType(
-      row.mimeType || object.httpMetadata?.contentType || "",
-      row.storageKey,
-    );
-    if (!mimeType) {
-      throw new ApiError(400, "VIDEO_REFERENCE_ASSET_TYPE_UNSUPPORTED", `项目图片“${row.name}”的文件格式不受 Seedance 支持。`);
     }
     return {
       kind: "local",
       name: row.name,
       role,
-      mimeType,
-      bytes: new Uint8Array(buffer),
+      storageKey: row.storageKey,
+      mimeTypeHint,
+      sizeBytes,
     };
   });
 
-  const localSizes = loaded
-    .filter((reference): reference is Extract<LoadedReference, { kind: "local" }> => reference.kind === "local")
-    .map((reference) => reference.bytes.byteLength);
+  const localSizes = prepared
+    .filter((reference): reference is Extract<PreparedReference, { kind: "local" }> => reference.kind === "local")
+    .map((reference) => reference.sizeBytes);
+  if (localSizes.reduce((total, size) => total + size, 0) > MAX_TOTAL_LOCAL_VIDEO_REFERENCE_BYTES) {
+    throw new ApiError(413, "VIDEO_REFERENCE_ASSETS_TOO_LARGE", "所选项目图片的本地文件合计不能超过 24 MB。");
+  }
   const localBudgets = allocateInlineByteBudgets(localSizes, MAX_INLINE_VIDEO_REFERENCE_BYTES);
   let localIndex = 0;
-  const budgetsByReference = loaded.map((reference) => (
+  const budgetsByReference = prepared.map((reference) => (
     reference.kind === "local" ? localBudgets[localIndex++] : null
   ));
+  const canUseOnlyHostedOptimization = Boolean(images) && prepared.every((reference) => {
+    if (reference.kind === "remote") return true;
+    const mimeType = normalizedImageMimeType(reference.mimeTypeHint, reference.storageKey);
+    return Boolean(mimeType && OPTIMIZABLE_IMAGE_MIME_TYPES.has(mimeType));
+  });
 
-  return mapWithConcurrency(loaded, REFERENCE_IO_CONCURRENCY, async (reference, index) => {
+  let fetchedLocalBytes = 0;
+  let bufferedLocalBytes = 0;
+  return mapWithConcurrency(prepared, canUseOnlyHostedOptimization ? REFERENCE_IO_CONCURRENCY : 1, async (reference, index) => {
     if (reference.kind === "remote") return { url: reference.url, role: reference.role };
     const inlineByteBudget = budgetsByReference[index] as number;
-    let inlineBytes = reference.bytes;
-    let inlineMimeType = reference.mimeType;
+    const object = await bucket.get(reference.storageKey);
+    if (!object) {
+      throw new ApiError(409, "VIDEO_REFERENCE_ASSET_CONTENT_MISSING", `项目图片“${reference.name}”的文件已不存在，请重新选择参考图。`);
+    }
+    if (object.size > MAX_LOCAL_VIDEO_REFERENCE_BYTES) {
+      throw new ApiError(413, "VIDEO_REFERENCE_ASSET_TOO_LARGE", `项目图片“${reference.name}”超过 8 MB，无法作为视频参考图。`);
+    }
+    fetchedLocalBytes += object.size;
+    if (fetchedLocalBytes > MAX_TOTAL_LOCAL_VIDEO_REFERENCE_BYTES) {
+      throw new ApiError(413, "VIDEO_REFERENCE_ASSETS_TOO_LARGE", "所选项目图片的本地文件合计不能超过 24 MB。");
+    }
+    const buffer = await object.arrayBuffer();
+    if (buffer.byteLength > MAX_LOCAL_VIDEO_REFERENCE_BYTES) {
+      throw new ApiError(413, "VIDEO_REFERENCE_ASSET_TOO_LARGE", `项目图片“${reference.name}”超过 8 MB，无法作为视频参考图。`);
+    }
+    bufferedLocalBytes += buffer.byteLength;
+    if (bufferedLocalBytes > MAX_TOTAL_LOCAL_VIDEO_REFERENCE_BYTES) {
+      throw new ApiError(413, "VIDEO_REFERENCE_ASSETS_TOO_LARGE", "所选项目图片的本地文件合计不能超过 24 MB。");
+    }
+    let inlineBytes = new Uint8Array(buffer);
+    let inlineMimeType = normalizedImageMimeType(
+      reference.mimeTypeHint || object.httpMetadata?.contentType || "",
+      reference.storageKey,
+    );
+    if (!inlineMimeType) {
+      throw new ApiError(400, "VIDEO_REFERENCE_ASSET_TYPE_UNSUPPORTED", `项目图片“${reference.name}”的文件格式不受 Seedance 支持。`);
+    }
     if (inlineBytes.byteLength > inlineByteBudget) {
-      if (!OPTIMIZABLE_IMAGE_MIME_TYPES.has(inlineMimeType)) {
+      const canUseHostedOptimizer = Boolean(images && OPTIMIZABLE_IMAGE_MIME_TYPES.has(inlineMimeType));
+      const canUseFallbackOptimizer = WORKER_OPTIMIZABLE_IMAGE_MIME_TYPES.has(inlineMimeType);
+      if (!canUseHostedOptimizer && !canUseFallbackOptimizer) {
         throw new ApiError(
           415,
           "VIDEO_REFERENCE_OPTIMIZATION_UNSUPPORTED",
-          `项目图片“${reference.name}”的格式无法在线压缩，请先转换为 JPEG、PNG 或 WebP。`,
+          `项目图片“${reference.name}”的格式无法在当前环境压缩，请先转换为 JPEG、PNG、WebP 或 BMP。`,
         );
       }
-      if (!images) {
-        throw new ApiError(
-          503,
-          "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
-          `项目图片“${reference.name}”需要压缩后才能提交视频任务，但图片处理服务当前不可用，请稍后重试。`,
+      let optimized: Awaited<ReturnType<typeof optimizeInlineReferenceImage>>
+        | Awaited<ReturnType<typeof optimizeInlineReferenceImageInWorker>>;
+      if (images && canUseHostedOptimizer) {
+        try {
+          optimized = await optimizeInlineReferenceImage(
+            images,
+            inlineBytes,
+            inlineByteBudget,
+            reference.name,
+          );
+        } catch (error) {
+          if (
+            !canUseFallbackOptimizer
+            || !(error instanceof ApiError)
+            || error.code !== "VIDEO_REFERENCE_OPTIMIZATION_FAILED"
+          ) throw error;
+          console.warn("Hosted reference image optimization failed; using the bounded Worker fallback", {
+            assetName: reference.name,
+            errorCode: error.code,
+          });
+          optimized = await optimizeInlineReferenceImageInWorker(
+            fallbackOptimizer,
+            inlineBytes,
+            inlineMimeType,
+            inlineByteBudget,
+            reference.name,
+          );
+        }
+      } else {
+        optimized = await optimizeInlineReferenceImageInWorker(
+          fallbackOptimizer,
+          inlineBytes,
+          inlineMimeType,
+          inlineByteBudget,
+          reference.name,
         );
       }
-      const optimized = await optimizeInlineReferenceImage(
-        images,
-        inlineBytes,
-        inlineByteBudget,
-        reference.name,
-      );
       inlineBytes = optimized.bytes;
       inlineMimeType = optimized.mimeType;
     }
@@ -237,6 +299,57 @@ export async function resolveVideoReferenceAssets(
       role: reference.role,
     };
   });
+}
+
+async function optimizeInlineReferenceImageInWorker(
+  optimizer: ReferenceImageFallbackOptimizer,
+  sourceBytes: Uint8Array<ArrayBuffer>,
+  mimeType: string,
+  byteBudget: number,
+  assetName: string,
+): Promise<{ bytes: Uint8Array<ArrayBuffer>; mimeType: "image/jpeg" }> {
+  try {
+    // jpeg-js rebuilds sizeable encoder tables for every call. Use one
+    // conservative variant in the 128 MB Worker rather than retaining memory
+    // from several back-to-back attempts. The hosted Images path can still
+    // try the full quality ladder.
+    const workerAttempts = optimizationAttempts(byteBudget).slice(-1);
+    const optimized = await optimizer(sourceBytes, mimeType, byteBudget, workerAttempts);
+    if (optimized?.bytes.byteLength && optimized.bytes.byteLength <= byteBudget) return optimized;
+  } catch (error) {
+    if (error instanceof ReferenceImageOptimizationInputError) {
+      if (error.reason === "unsafe_dimensions") {
+        throw new ApiError(
+          413,
+          "VIDEO_REFERENCE_PAYLOAD_TOO_LARGE",
+          `项目图片“${assetName}”的文件或像素尺寸过大，请换用尺寸更小的参考图。`,
+        );
+      }
+      if (error.reason === "unsupported_format") {
+        throw new ApiError(
+          415,
+          "VIDEO_REFERENCE_ASSET_TYPE_UNSUPPORTED",
+          `项目图片“${assetName}”使用了当前环境不支持的无损 WebP 编码，请先转换为 JPEG、PNG 或普通有损 WebP。`,
+        );
+      }
+      throw new ApiError(
+        415,
+        "VIDEO_REFERENCE_ASSET_TYPE_UNSUPPORTED",
+        `项目图片“${assetName}”无法解码，请重新上传有效的 JPEG、PNG、WebP 或 BMP 图片。`,
+      );
+    }
+    console.error("Video reference image in-Worker optimization failed", { assetName, error });
+    throw new ApiError(
+      503,
+      "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
+      `项目图片“${assetName}”暂时无法压缩为视频参考图，请稍后重试。`,
+    );
+  }
+  throw new ApiError(
+    413,
+    "VIDEO_REFERENCE_PAYLOAD_TOO_LARGE",
+    `项目图片“${assetName}”压缩后仍过大，请换用尺寸更小的参考图。`,
+  );
 }
 
 async function optimizeInlineReferenceImage(
@@ -352,7 +465,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function optimizationAttempts(byteBudget: number): Array<{ width: number; quality: number }> {
+function optimizationAttempts(byteBudget: number): ReferenceImageOptimizationAttempt[] {
   if (byteBudget >= 768 * 1024) {
     return [
       { width: 1_600, quality: 84 },

@@ -2,6 +2,17 @@ import type { AssetGenerationJob, AssetRelationInput } from "../platform-types";
 import { ApiError, nowIso, parseJson } from "./api";
 import { allRows } from "./store";
 
+const SAFE_PRE_PROVIDER_RETRY_CODES = new Set([
+  "VIDEO_PREPARATION_INTERRUPTED",
+  "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
+  "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+  "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
+]);
+
+export function isSafePreProviderRetryCode(code: string | null | undefined): boolean {
+  return typeof code === "string" && SAFE_PRE_PROVIDER_RETRY_CODES.has(code);
+}
+
 const generationSelect = `SELECT id, project_id AS projectId, owner_id AS ownerId,
   client_request_id AS clientRequestId, model_id AS modelId, model_name AS modelName,
   media_type AS mediaType,
@@ -31,6 +42,11 @@ export function serializeAssetGeneration(row: Record<string, unknown>): AssetGen
   const pollDue = !nextPollAt || Date.parse(nextPollAt) <= Date.now();
   const dismissedAt = typeof row.dismissedAt === "string" ? row.dismissedAt : null;
   const providerTaskId = typeof row.providerTaskId === "string" && row.providerTaskId ? row.providerTaskId : null;
+  const errorCode = typeof row.errorCode === "string" ? row.errorCode : null;
+  const safePreProviderRetry = row.mediaType === "video"
+    && !providerTaskId
+    && progress < 15
+    && isSafePreProviderRetryCode(errorCode);
   const submissionStateUnknown = row.mediaType === "video"
     && status === "running"
     && attemptCount > 0
@@ -57,9 +73,9 @@ export function serializeAssetGeneration(row: Record<string, unknown>): AssetGen
     phase: String(row.phase) as AssetGenerationJob["phase"],
     progress,
     attemptCount,
-    errorCode: typeof row.errorCode === "string" ? row.errorCode : null,
+    errorCode,
     errorMessage: typeof row.errorMessage === "string" ? row.errorMessage : null,
-    retryable: Boolean(row.retryable) && (Boolean(providerTaskId) || attemptCount < 3),
+    retryable: safePreProviderRetry || (Boolean(row.retryable) && (Boolean(providerTaskId) || attemptCount < 3)),
     assetId: typeof row.assetId === "string" ? row.assetId : null,
     canRun: !dismissedAt && !submissionStateUnknown && (Boolean(providerTaskId) || attemptCount < 3) && pollDue
       && (status === "queued" || (status === "running" && leaseExpired)),
@@ -88,6 +104,18 @@ export async function listAssetGenerations(
     WHERE project_id = ? AND owner_id = ? AND dismissed_at IS NULL
       AND media_type = 'video' AND status = 'running' AND provider_task_id IS NULL
       AND attempt_count > 0 AND progress >= 15
+      AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`)
+    .bind(now, now, projectId, ownerId, now)
+    .run();
+  await db.prepare(`UPDATE asset_generation_jobs SET
+      status = 'failed', phase = 'failed', retryable = 1,
+      error_code = 'VIDEO_PREPARATION_INTERRUPTED',
+      error_message = '视频任务在提交供应商前中断，尚未产生官方任务，可安全重试。',
+      lease_token = NULL, lease_expires_at = NULL, next_poll_at = NULL,
+      updated_at = ?, completed_at = ?
+    WHERE project_id = ? AND owner_id = ? AND dismissed_at IS NULL
+      AND media_type = 'video' AND status = 'running' AND provider_task_id IS NULL
+      AND attempt_count >= 3 AND progress < 15
       AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`)
     .bind(now, now, projectId, ownerId, now)
     .run();
@@ -254,12 +282,22 @@ export async function persistGenerationFailure(
   failure: GenerationFailure,
 ): Promise<void> {
   const now = nowIso();
+  const safePreProviderRetry = failure.retryable && isSafePreProviderRetryCode(failure.code);
   const result = await db.prepare(`UPDATE asset_generation_jobs
     SET status = 'failed', phase = 'failed', error_code = ?, error_message = ?,
-      retryable = CASE WHEN attempt_count >= 3 THEN 0 ELSE ? END,
+      retryable = CASE WHEN ? = 1 THEN 1 WHEN attempt_count >= 3 THEN 0 ELSE ? END,
       lease_token = NULL, lease_expires_at = NULL, next_poll_at = NULL, updated_at = ?, completed_at = ?
     WHERE id = ? AND status = 'running' AND lease_token = ?`)
-    .bind(failure.code, failure.message.slice(0, 800), failure.retryable ? 1 : 0, now, now, generationId, leaseToken)
+    .bind(
+      failure.code,
+      failure.message.slice(0, 800),
+      safePreProviderRetry ? 1 : 0,
+      failure.retryable ? 1 : 0,
+      now,
+      now,
+      generationId,
+      leaseToken,
+    )
     .run();
   if (!result.meta.changes) {
     console.error("Asset generation failure could not be persisted because the lease changed", {
@@ -275,6 +313,9 @@ export function generationFailure(
   mediaType: "image" | "video" = "image",
 ): GenerationFailure {
   if (error instanceof ApiError) {
+    if (isSafePreProviderRetryCode(error.code)) {
+      return { code: error.code, message: error.message, retryable: !providerInvoked };
+    }
     const nonRetryable = new Set([
       "MODEL_DISABLED",
       "MODEL_NOT_FOUND",
@@ -356,7 +397,11 @@ export function generationFailure(
       "VIDEO_RESPONSE_STREAM_FAILED",
       "VIDEO_GENERATION_FAILED",
     ].includes(error.code);
-    return { code: error.code, message: error.message, retryable: !nonRetryable.has(error.code) && !ambiguousPaidSubmission };
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: !nonRetryable.has(error.code) && !ambiguousPaidSubmission,
+    };
   }
   console.error("Unhandled asset generation error", error);
   return {

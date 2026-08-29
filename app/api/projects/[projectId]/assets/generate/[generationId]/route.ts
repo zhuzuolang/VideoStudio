@@ -3,6 +3,7 @@ import {
   generationFailure,
   getAssetGeneration,
   getGenerationStorageKey,
+  isSafePreProviderRetryCode,
   markGenerationProviderSubmissionStarted,
   persistGenerationFailure,
   persistGenerationProviderTask,
@@ -27,7 +28,6 @@ import { parseVideoReferenceAssets, resolveVideoReferenceAssets } from "@/lib/se
 export const dynamic = "force-dynamic";
 const LEASE_MS = 300_000;
 const LEASE_HEARTBEAT_MS = 45_000;
-const VIDEO_SUBMISSION_OVERALL_DEADLINE_MS = 40_000;
 const VIDEO_POLL_AFTER_MS = 5_000;
 const VIDEO_POLL_RETRY_AFTER_MS = 15_000;
 const TRANSIENT_VIDEO_TASK_QUERY_CODES = new Set([
@@ -101,7 +101,6 @@ export async function DELETE(request: Request, context: RouteContext<{ projectId
 }
 
 export async function POST(request: Request, context: RouteContext<{ projectId: string; generationId: string }>): Promise<Response> {
-  const videoSubmissionDeadlineAt = Date.now() + VIDEO_SUBMISSION_OVERALL_DEADLINE_MS;
   let generationId = "";
   let leaseToken = "";
   let db: D1Database | null = null;
@@ -132,18 +131,22 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     const canResumeProviderTask = generation.mediaType === "video"
       && Boolean(generation.providerTaskId)
       && !VIDEO_TASK_RESTART_CODES.has(generation.errorCode || "");
+    const safePreProviderRetry = generation.mediaType === "video"
+      && !generation.providerTaskId
+      && generation.progress < 15
+      && isSafePreProviderRetryCode(generation.errorCode);
 
     if (generation.status === "succeeded") return ok({ generation });
     if (generation.status === "failed" && !retry) {
       throw new ApiError(409, "GENERATION_RETRY_REQUIRED", "该生成任务已失败，请确认后重试。");
     }
     if (generation.status === "failed" && retry
-      && !generation.retryable && !confirmedRetry && !canResumeProviderTask) {
+      && !generation.retryable && !confirmedRetry && !canResumeProviderTask && !safePreProviderRetry) {
       throw new ApiError(409, "GENERATION_NOT_RETRYABLE", generation.errorMessage || "当前错误无法通过重复请求解决，请修改模型配置或提示词后新建任务。");
     }
-    // The three-attempt cap guards automatic retries. An owner-confirmed retry is a
-    // deliberate new attempt and may proceed after the cap, including the billing warning shown by the client.
-    if (generation.status === "failed" && retry && !confirmedRetry
+    // The three-attempt cap guards automatic retries. Owner-confirmed retries may
+    // proceed after the cap, as may failures proven to occur before provider dispatch.
+    if (generation.status === "failed" && retry && !confirmedRetry && !safePreProviderRetry
       && !generation.providerTaskId && generation.attemptCount >= 3) {
       throw new ApiError(409, "GENERATION_ATTEMPT_LIMIT", "该任务已达到 3 次尝试上限，请检查模型配置后新建任务。");
     }
@@ -160,7 +163,8 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
           next_poll_at = NULL, updated_at = ?, started_at = ?, completed_at = NULL
         WHERE id = ? AND project_id = ? AND owner_id = ? AND status = 'failed'
-          AND dismissed_at IS NULL AND (? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3)`)
+          AND dismissed_at IS NULL
+          AND (? = 1 OR ? = 1 OR provider_task_id IS NOT NULL OR attempt_count < 3)`)
         .bind(
           restartProviderTask ? 1 : 0,
           restartProviderTask ? 1 : 0,
@@ -173,6 +177,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
           projectId,
           identity.userId,
           confirmedRetry ? 1 : 0,
+          safePreProviderRetry ? 1 : 0,
         ).run()
       : await db.prepare(`UPDATE asset_generation_jobs SET
           status = 'running', phase = 'model',
@@ -253,7 +258,6 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
         // Validate the model-specific profile before marking the call as potentially billable.
         buildVideoGenerationRequest(model, videoInput);
         const created = await createVideoGenerationTask(model, videoInput, fetch, {
-          deadlineAt: videoSubmissionDeadlineAt,
           beforeDispatch: async () => {
             await markGenerationProviderSubmissionStarted(db as D1Database, generationId, leaseToken);
             providerInvoked = true;

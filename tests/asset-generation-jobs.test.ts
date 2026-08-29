@@ -2,10 +2,13 @@ import { expect, test, vi } from "vitest";
 import { ApiError } from "@/lib/server/api";
 import {
   generationFailure,
+  listAssetGenerations,
   markGenerationProviderSubmissionStarted,
+  persistGenerationFailure,
   releaseGenerationForPolling,
   serializeAssetGeneration,
 } from "@/lib/server/asset-generation-jobs";
+import { allRows } from "@/lib/server/store";
 
 vi.mock("@/lib/server/store", () => ({ allRows: vi.fn() }));
 
@@ -61,6 +64,83 @@ test("视频创建响应不确定时禁止重提，但安全轮询与入库失�
   expect(generationFailure(new ApiError(502, "VIDEO_RESPONSE_STREAM_FAILED", "body interrupted"), true, "video").retryable).toBe(false);
   expect(generationFailure(new ApiError(422, "VIDEO_TASK_FAILED", "failed"), false, "video").retryable).toBe(false);
   expect(generationFailure(new ApiError(503, "VIDEO_STORAGE_FAILED", "r2"), false, "video").retryable).toBe(true);
+});
+
+test("参考图压缩预提交失败始终保持可安全重试", () => {
+  for (const code of [
+    "VIDEO_PREPARATION_INTERRUPTED",
+    "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
+    "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+    "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
+  ]) {
+    expect(generationFailure(new ApiError(503, code, "preflight failed"), false, "video")).toEqual({
+      code,
+      message: "preflight failed",
+      retryable: true,
+    });
+    expect(generationFailure(new ApiError(503, code, "late failure"), true, "video").retryable).toBe(false);
+    expect(serializeAssetGeneration({
+      ...baseRow,
+      mediaType: "video",
+      optionsJson: "{}",
+      status: "failed",
+      phase: "failed",
+      progress: 10,
+      providerTaskId: null,
+      attemptCount: 3,
+      errorCode: code,
+      retryable: 0,
+    }).retryable).toBe(true);
+  }
+});
+
+test("第三次安全预提交重试崩溃后仍保留无计费重试语义", async () => {
+  const statements: Array<{ sql: string; values: unknown[] }> = [];
+  const db = {
+    prepare: vi.fn((sql: string) => {
+      const statement = {
+        bind: vi.fn((...values: unknown[]) => {
+          statements.push({ sql, values });
+          return statement;
+        }),
+        run: vi.fn(async () => ({ meta: { changes: 1 } })),
+      };
+      return statement;
+    }),
+  } as unknown as D1Database;
+  vi.mocked(allRows).mockResolvedValueOnce([]);
+
+  await listAssetGenerations(db, "project-1", "user-1");
+
+  expect(statements[1].sql).toContain("error_code = 'VIDEO_PREPARATION_INTERRUPTED'");
+  expect(statements[1].sql).toContain("progress < 15");
+  expect(statements[2].sql).toContain("error_code = 'GENERATION_ATTEMPT_LIMIT'");
+});
+
+test("参考图压缩预提交失败达到三次后仍持久化为可重试", async () => {
+  const statements: Array<{ sql: string; values: unknown[] }> = [];
+  const db = {
+    prepare: vi.fn((sql: string) => ({
+      bind: vi.fn((...values: unknown[]) => {
+        statements.push({ sql, values });
+        return { run: vi.fn(async () => ({ meta: { changes: 1 } })) };
+      }),
+    })),
+  } as unknown as D1Database;
+
+  await persistGenerationFailure(db, "gen-1", "lease-1", {
+    code: "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+    message: "图片处理服务当前不可用。",
+    retryable: true,
+  });
+
+  expect(statements[0].sql).toContain("CASE WHEN ? = 1 THEN 1 WHEN attempt_count >= 3 THEN 0");
+  expect(statements[0].values.slice(0, 4)).toEqual([
+    "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+    "图片处理服务当前不可用。",
+    1,
+    1,
+  ]);
 });
 
 test("达到三次尝试或已归档的任务不会再次被 runner 认领", () => {

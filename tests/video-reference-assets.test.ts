@@ -321,7 +321,72 @@ describe("resolveVideoReferenceAssets", () => {
     expect(encodedBytes).toBeLessThan((firstBytes.byteLength + lastBytes.byteLength) / 10);
   });
 
-  test("fails before provider submission when a large local reference has no Images binding", async () => {
+  test("uses the injected Worker fallback when a large local reference has no Images binding", async () => {
+    const bytes = new Uint8Array(2_360_000).fill(0x31);
+    const compactedBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const { db } = databaseReturning([
+      readyImageRow("asset-large", { sizeBytes: bytes.byteLength }),
+    ]);
+    const bucket = {
+      get: vi.fn(async () => r2ImageObject(bytes)),
+    } as unknown as R2Bucket;
+    const fallback = vi.fn(async (
+      sourceBytes: Uint8Array<ArrayBuffer>,
+      mimeType: string,
+      byteBudget: number,
+      attempts: readonly { width: number; quality: number }[],
+    ) => {
+      expect(sourceBytes.byteLength).toBe(bytes.byteLength);
+      expect(mimeType).toBe("image/png");
+      expect(byteBudget).toBe(MAX_INLINE_VIDEO_REFERENCE_BYTES);
+      expect(attempts).toEqual([{ width: 720, quality: 62 }]);
+      return { bytes: compactedBytes, mimeType: "image/jpeg" as const };
+    });
+
+    await expect(resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [{ assetId: "asset-large", role: "reference_image" }],
+      undefined,
+      fallback,
+    )).resolves.toEqual([
+      { url: "data:image/jpeg;base64,/9j/2Q==", role: "reference_image" },
+    ]);
+    expect(fallback).toHaveBeenCalledOnce();
+  });
+
+  test("reads and optimizes fallback references one at a time to bound Worker memory", async () => {
+    const bytes = new Uint8Array(1_500_000).fill(0x31);
+    const { db } = databaseReturning([
+      readyImageRow("asset-first", { sizeBytes: bytes.byteLength }),
+      readyImageRow("asset-second", { sizeBytes: bytes.byteLength }),
+    ]);
+    const get = vi.fn(async () => r2ImageObject(bytes));
+    const bucket = { get } as unknown as R2Bucket;
+    const fallback = vi.fn(async () => ({
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      mimeType: "image/jpeg" as const,
+    }));
+
+    await resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [
+        { assetId: "asset-first", role: "reference_image" },
+        { assetId: "asset-second", role: "reference_image" },
+      ],
+      undefined,
+      fallback,
+    );
+
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(fallback).toHaveBeenCalledTimes(2);
+    expect(get.mock.invocationCallOrder[1]).toBeGreaterThan(fallback.mock.invocationCallOrder[0]);
+  });
+
+  test("maps an injected Worker fallback failure to a retryable optimization error", async () => {
     const bytes = new Uint8Array(2_360_000).fill(0x31);
     const { db } = databaseReturning([
       readyImageRow("asset-large", { sizeBytes: bytes.byteLength }),
@@ -329,19 +394,82 @@ describe("resolveVideoReferenceAssets", () => {
     const bucket = {
       get: vi.fn(async () => r2ImageObject(bytes)),
     } as unknown as R2Bucket;
+    const fallback = vi.fn(async () => {
+      throw new Error("Worker codec failed");
+    });
 
     await expect(resolveVideoReferenceAssets(
       db,
       bucket,
       "project-1",
       [{ assetId: "asset-large", role: "reference_image" }],
+      undefined,
+      fallback,
     )).rejects.toMatchObject({
       status: 503,
-      code: "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+      code: "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
+    });
+    expect(fallback).toHaveBeenCalledOnce();
+  });
+
+  test("rejects fallback output that exceeds its allocated inline budget", async () => {
+    const bytes = new Uint8Array(2_360_000).fill(0x31);
+    const { db } = databaseReturning([
+      readyImageRow("asset-large", { sizeBytes: bytes.byteLength }),
+    ]);
+    const bucket = {
+      get: vi.fn(async () => r2ImageObject(bytes)),
+    } as unknown as R2Bucket;
+    const fallback = vi.fn(async () => ({
+      bytes: new Uint8Array(MAX_INLINE_VIDEO_REFERENCE_BYTES + 1),
+      mimeType: "image/jpeg" as const,
+    }));
+
+    await expect(resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [{ assetId: "asset-large", role: "reference_image" }],
+      undefined,
+      fallback,
+    )).rejects.toMatchObject({
+      status: 413,
+      code: "VIDEO_REFERENCE_PAYLOAD_TOO_LARGE",
     });
   });
 
-  test("fails before provider submission when an available Images binding cannot compact a local reference", async () => {
+  test("keeps unsupported fallback formats as deterministic input errors", async () => {
+    const bytes = new Uint8Array(2_360_000).fill(0x31);
+    const { db } = databaseReturning([
+      readyImageRow("asset-large", {
+        mimeType: "image/gif",
+        sizeBytes: bytes.byteLength,
+        storageKey: "projects/project-1/asset-large.gif",
+      }),
+    ]);
+    const bucket = {
+      get: vi.fn(async () => r2ImageObject(bytes, "image/gif")),
+    } as unknown as R2Bucket;
+    const fallback = vi.fn(async () => ({
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      mimeType: "image/jpeg" as const,
+    }));
+
+    await expect(resolveVideoReferenceAssets(
+      db,
+      bucket,
+      "project-1",
+      [{ assetId: "asset-large", role: "reference_image" }],
+      undefined,
+      fallback,
+    )).rejects.toMatchObject({
+      status: 415,
+      code: "VIDEO_REFERENCE_OPTIMIZATION_UNSUPPORTED",
+    });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  test("uses the bounded Worker fallback when an available Images binding cannot compact a local reference", async () => {
     const bytes = new Uint8Array(2_360_000).fill(0x31);
     const { db } = databaseReturning([
       readyImageRow("asset-large", { sizeBytes: bytes.byteLength }),
@@ -358,6 +486,10 @@ describe("resolveVideoReferenceAssets", () => {
         })),
       })),
     };
+    const fallback = vi.fn(async () => ({
+      bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      mimeType: "image/jpeg" as const,
+    }));
 
     await expect(resolveVideoReferenceAssets(
       db,
@@ -365,10 +497,11 @@ describe("resolveVideoReferenceAssets", () => {
       "project-1",
       [{ assetId: "asset-large", role: "reference_image" }],
       images as unknown as ImageTransformationBinding,
-    )).rejects.toMatchObject({
-      status: 503,
-      code: "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
-    });
+      fallback,
+    )).resolves.toEqual([
+      { url: "data:image/jpeg;base64,/9j/2Q==", role: "reference_image" },
+    ]);
+    expect(fallback).toHaveBeenCalledOnce();
   });
 
   test("rejects an Images result that remains above the inline payload budget after all attempts", async () => {

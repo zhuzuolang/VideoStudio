@@ -302,33 +302,11 @@ describe("异步任务创建和查询", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  test("整体截止时间不足最小发送预算时在计费边界前安全退出", async () => {
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const beforeDispatch = vi.fn(async () => undefined);
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: "should-not-exist" }))) as unknown as typeof fetch;
-
-    try {
-      await expect(createVideoGenerationTask(
-        configuredModel(1),
-        { prompt: "海边日落" },
-        fetchImpl,
-        { beforeDispatch, deadlineAt: 5_999 },
-      )).rejects.toMatchObject({
-        status: 503,
-        code: "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
-      });
-      expect(beforeDispatch).not.toHaveBeenCalled();
-      expect(fetchImpl).not.toHaveBeenCalled();
-    } finally {
-      nowSpy.mockRestore();
-    }
-  });
-
-  test("供应商发送超时取 35 秒上限与整体剩余时间中的较小值", async () => {
-    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+  test("参考图准备不受整体时限限制，供应商发送仍使用独立的 35 秒网络超时", async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     const timeoutController = new AbortController();
     timeoutSpy.mockReturnValue(timeoutController.signal);
+    const beforeDispatch = vi.fn(async () => undefined);
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: "cgt-created" }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -339,21 +317,12 @@ describe("异步任务创建和查询", () => {
         configuredModel(1),
         { prompt: "海边日落" },
         fetchImpl,
-        { deadlineAt: 21_000 },
+        { beforeDispatch },
       )).resolves.toEqual({ taskId: "cgt-created" });
-      expect(timeoutSpy).toHaveBeenCalledWith(20_000);
-
-      timeoutSpy.mockClear();
-      await expect(createVideoGenerationTask(
-        configuredModel(1),
-        { prompt: "海边日落" },
-        fetchImpl,
-        { deadlineAt: 60_000 },
-      )).resolves.toEqual({ taskId: "cgt-created" });
+      expect(beforeDispatch).toHaveBeenCalledOnce();
       expect(timeoutSpy).toHaveBeenCalledWith(35_000);
     } finally {
       timeoutSpy.mockRestore();
-      nowSpy.mockRestore();
     }
   });
 

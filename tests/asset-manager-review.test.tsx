@@ -601,6 +601,60 @@ describe("AssetManager 审查项回归", () => {
     expect(retryBody).toEqual({ retry: true, confirmedRetry: true });
   });
 
+  test.each([
+    ["VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE", "参考图需要压缩，但图片处理服务当前不可用。"],
+    ["VIDEO_SUBMISSION_PREPARATION_TIMEOUT", "参考图准备耗时过长，尚未提交付费视频任务。"],
+  ])("安全的预提交失败超过三次仍可直接重试（%s）", async (errorCode, errorMessage) => {
+    let serverJob = makeGenerationJob({
+      id: "gen-video-preflight",
+      mediaType: "video",
+      name: "参考图预处理任务",
+      status: "failed",
+      phase: "failed",
+      progress: 10,
+      attemptCount: 3,
+      providerTaskId: null,
+      errorCode,
+      errorMessage,
+      retryable: false,
+      canRun: false,
+    });
+    let retryBody: Record<string, unknown> | null = null;
+    const confirmMock = vi.fn();
+    vi.stubGlobal("confirm", confirmMock);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/assets/generate/gen-video-preflight") && init?.method === "POST") {
+          retryBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          serverJob = {
+            ...serverJob,
+            status: "running",
+            phase: "model",
+            errorCode: null,
+            errorMessage: null,
+            canRun: false,
+          };
+          return new Response(JSON.stringify({ data: { generation: serverJob } }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [serverJob] });
+        if (url.endsWith("/assets") || url.endsWith("/characters") || url === "/api/models") return jsonResponse([]);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+
+    await user.click(await screen.findByRole("button", { name: "重试生成 参考图预处理任务" }));
+    await waitFor(() => expect(retryBody).toEqual({ retry: true, confirmedRetry: false }));
+    expect(confirmMock).not.toHaveBeenCalled();
+  });
+
   test("视频参考图只列出已就绪项目图片，并按重排后的顺序与角色提交", async () => {
     const model = makeModel({
       id: "seedance-2-5",

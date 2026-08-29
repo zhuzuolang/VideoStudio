@@ -335,6 +335,13 @@ const TERMINAL_VIDEO_TASK_CODES = new Set([
   "VIDEO_TASK_EXPIRED",
 ]);
 
+const SAFE_PRE_PROVIDER_RETRY_CODES = new Set([
+  "VIDEO_PREPARATION_INTERRUPTED",
+  "VIDEO_SUBMISSION_PREPARATION_TIMEOUT",
+  "VIDEO_REFERENCE_OPTIMIZATION_UNAVAILABLE",
+  "VIDEO_REFERENCE_OPTIMIZATION_FAILED",
+]);
+
 function generationRetryConfirmation(generation: AssetGenerationJob): string {
   if (generation.mediaType === "video"
     && !generation.providerTaskId
@@ -353,6 +360,13 @@ function canResumeExistingVideoTask(generation: AssetGenerationJob): boolean {
   return generation.mediaType === "video"
     && Boolean(generation.providerTaskId)
     && !TERMINAL_VIDEO_TASK_CODES.has(generation.errorCode || "");
+}
+
+function isSafePreProviderRetry(generation: AssetGenerationJob): boolean {
+  return generation.mediaType === "video"
+    && !generation.providerTaskId
+    && generation.progress < 15
+    && SAFE_PRE_PROVIDER_RETRY_CODES.has(generation.errorCode || "");
 }
 
 function AssetPreview({ asset }: { asset: ProjectAsset }) {
@@ -448,9 +462,10 @@ function GenerationCard({
   const submissionUnconfirmed = generation.status === "submitting"
     && generation.errorCode === "GENERATION_SUBMISSION_UNCONFIRMED";
   const resumableVideoTask = failed && canResumeExistingVideoTask(generation);
+  const safePreProviderRetry = failed && isSafePreProviderRetry(generation);
   const retryAvailable = submissionUnconfirmed || (failed && !generation.id.startsWith("local:"));
   const confirmedRetryRequired = failed && !generation.retryable
-    && !resumableVideoTask && !generation.id.startsWith("local:");
+    && !resumableVideoTask && !safePreProviderRetry && !generation.id.startsWith("local:");
   const uncertainVideoSubmission = confirmedRetryRequired
     && generation.mediaType === "video"
     && !generation.providerTaskId
@@ -1693,7 +1708,9 @@ export default function AssetManager({
       void confirmUncertainGeneration(generation);
       return;
     }
-    const confirmedRetry = !generation.retryable && !canResumeExistingVideoTask(generation);
+    const confirmedRetry = !generation.retryable
+      && !canResumeExistingVideoTask(generation)
+      && !isSafePreProviderRetry(generation);
     if (confirmedRetry && !window.confirm(generationRetryConfirmation(generation))) return;
     void runGeneration(generation.id, true, confirmedRetry);
   }
