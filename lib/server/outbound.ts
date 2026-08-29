@@ -9,12 +9,41 @@ const FORBIDDEN_HOSTS = new Set([
   "instance-data",
 ]);
 
+// Built-in provider presets use this vendor-owned HTTPS host. Its TLS identity and
+// exact hostname are stable, while third-party DNS-over-HTTPS lookups can be
+// unavailable from some Worker regions. Only this exact host on the default HTTPS
+// port may bypass the external DNS preflight; all other URL safety checks remain.
+const TRUSTED_HTTPS_MODEL_HOSTS = new Set([
+  "ark.cn-beijing.volces.com",
+]);
+
+const PUBLIC_DNS_JSON_RESOLVERS = [
+  "https://cloudflare-dns.com/dns-query",
+  "https://dns.alidns.com/resolve",
+];
+
 export async function validateModelEndpoint(value: string): Promise<string> {
   const localEndpoint = localDevelopmentModelEndpoint(value);
   if (localEndpoint) return localEndpoint;
   const allowlistedHttpEndpoint = allowlistedPublicHttpModelEndpoint(value);
   if (allowlistedHttpEndpoint) return allowlistedHttpEndpoint;
-  return validatePublicHttpsUrl(value, { allowQuery: false, purpose: "模型地址" });
+  return validatePublicHttpsUrlInternal(
+    value,
+    { allowQuery: false, purpose: "模型地址" },
+    isTrustedHttpsModelEndpoint(value),
+  );
+}
+
+function isTrustedHttpsModelEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+    return url.protocol === "https:"
+      && !url.port
+      && TRUSTED_HTTPS_MODEL_HOSTS.has(hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function localDevelopmentModelEndpoint(value: string): string | null {
@@ -92,6 +121,14 @@ export async function validatePublicHttpsUrl(
   value: string,
   options: { allowQuery?: boolean; purpose?: string } = {},
 ): Promise<string> {
+  return validatePublicHttpsUrlInternal(value, options, false);
+}
+
+async function validatePublicHttpsUrlInternal(
+  value: string,
+  options: { allowQuery?: boolean; purpose?: string },
+  skipDnsLookup: boolean,
+): Promise<string> {
   const purpose = options.purpose ?? "远程地址";
   let url: URL;
   try {
@@ -123,7 +160,7 @@ export async function validatePublicHttpsUrl(
     if (!isPublicIp(hostname)) {
       throw new ApiError(400, "UNSAFE_PUBLIC_URL", `${purpose}不能指向私有、回环或保留 IP。 `);
     }
-  } else {
+  } else if (!skipDnsLookup) {
     await assertPublicDns(hostname, purpose);
   }
 
@@ -195,35 +232,60 @@ function parseIpv6(address: string): number[] | null {
 }
 
 async function assertPublicDns(hostname: string, purpose: string): Promise<void> {
-  const addresses: string[] = [];
-  try {
-    const responses = await Promise.all(
-      (["A", "AAAA"] as const).map(async (type) => {
-        const url = new URL("https://dns.alidns.com/resolve");
-        url.searchParams.set("name", hostname);
-        url.searchParams.set("type", type);
-        const response = await fetch(url, {
-          headers: { accept: "application/dns-json" },
-          redirect: "manual",
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (!response.ok) throw new Error(`DNS lookup failed (${response.status})`);
-        return (await response.json()) as { Answer?: Array<{ type: number; data: string }> };
-      }),
-    );
-    for (const result of responses) {
-      for (const answer of result.Answer ?? []) {
-        if (answer.type === 1 || answer.type === 28) addresses.push(answer.data);
+  let lookupSucceeded = false;
+  for (const resolver of PUBLIC_DNS_JSON_RESOLVERS) {
+    try {
+      const queryResults = await Promise.allSettled(
+        (["A", "AAAA"] as const).map(async (type) => {
+          const url = new URL(resolver);
+          url.searchParams.set("name", hostname);
+          url.searchParams.set("type", type);
+          const response = await fetch(url, {
+            headers: { accept: "application/dns-json" },
+            redirect: "manual",
+            signal: AbortSignal.timeout(3_000),
+          });
+          if (!response.ok) throw new Error(`DNS lookup failed (${response.status})`);
+          const result = (await response.json()) as {
+            Status?: number;
+            Answer?: unknown;
+          };
+          if (!result || typeof result !== "object") throw new Error("DNS lookup returned invalid JSON");
+          if (typeof result.Status === "number" && ![0, 3].includes(result.Status)) {
+            throw new Error(`DNS lookup returned status ${result.Status}`);
+          }
+          if (result.Answer !== undefined && !Array.isArray(result.Answer)) {
+            throw new Error("DNS lookup returned invalid answers");
+          }
+          const answers = (result.Answer ?? []).filter((answer): answer is { type: number; data: string } => (
+            Boolean(answer)
+            && typeof answer === "object"
+            && typeof (answer as { type?: unknown }).type === "number"
+            && typeof (answer as { data?: unknown }).data === "string"
+          ));
+          return { Answer: answers };
+        }),
+      );
+      const responses = queryResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const addresses = responses.flatMap((result) => result.Answer
+        .filter((answer) => answer.type === 1 || answer.type === 28)
+        .map((answer) => answer.data));
+      if (addresses.some((address) => !isPublicIp(address))) {
+        throw new ApiError(400, "UNSAFE_PUBLIC_URL", `${purpose}解析到了私有、回环或保留网络。 `);
       }
+      if (queryResults.some((result) => result.status === "rejected")) continue;
+      lookupSucceeded = true;
+      if (addresses.length > 0) return;
+    } catch (reason) {
+      if (reason instanceof ApiError) throw reason;
     }
-  } catch {
-    throw new ApiError(400, "PUBLIC_URL_DNS_FAILED", `无法验证${purpose}的公网 DNS，请检查地址后重试。 `);
   }
 
-  if (addresses.length === 0) {
-    throw new ApiError(400, "PUBLIC_URL_DNS_FAILED", `${purpose}没有可用的公网 DNS 记录。 `);
-  }
-  if (addresses.some((address) => !isPublicIp(address))) {
-    throw new ApiError(400, "UNSAFE_PUBLIC_URL", `${purpose}解析到了私有、回环或保留网络。 `);
-  }
+  throw new ApiError(
+    400,
+    "PUBLIC_URL_DNS_FAILED",
+    lookupSucceeded
+      ? `${purpose}没有可用的公网 DNS 记录。 `
+      : `无法验证${purpose}的公网 DNS，请检查地址后重试。 `,
+  );
 }

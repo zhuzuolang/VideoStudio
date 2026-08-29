@@ -31,6 +31,153 @@ describe("OpenAI-compatible 模型路径归一化", () => {
     await expect(validateModelEndpoint("http://127.0.0.1:8317/v1")).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
   });
 
+  test("火山方舟官方 HTTPS 模型地址不依赖第三方 DNS 预检", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("DoH unavailable"));
+    try {
+      for (const endpoint of [
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks",
+      ]) {
+        await expect(validateModelEndpoint(endpoint)).resolves.toBe(endpoint);
+      }
+      await expect(
+        validateModelEndpoint("https://ark.cn-beijing.volces.com/api/v3?token=unsafe"),
+      ).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+      await expect(
+        validateModelEndpoint("https://user@ark.cn-beijing.volces.com/api/v3"),
+      ).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+      await expect(
+        validateModelEndpoint("https://ark.cn-beijing.volces.com/api/v3#fragment"),
+      ).rejects.toMatchObject({ code: "INVALID_PUBLIC_URL" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("相似域名和非默认端口仍必须通过公网 DNS 检查", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("DoH unavailable"));
+    try {
+      await expect(
+        validateModelEndpoint("https://ark.cn-beijing.volces.com.example.test/api/v3"),
+      ).rejects.toMatchObject({ code: "PUBLIC_URL_DNS_FAILED" });
+      await expect(
+        validateModelEndpoint("https://ark.cn-beijing.volces.com:8443/api/v3"),
+      ).rejects.toMatchObject({ code: "PUBLIC_URL_DNS_FAILED" });
+      expect(fetchMock).toHaveBeenCalled();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("公网 URL 在首选 DNS 解析器不可用时使用安全回退", async () => {
+    const resolverHosts: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      resolverHosts.push(url.hostname);
+      if (url.hostname === "cloudflare-dns.com") throw new Error("primary resolver unavailable");
+      const type = url.searchParams.get("type");
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: type === "A" ? [{ type: 1, data: "93.184.216.34" }] : [],
+      }), { status: 200, headers: { "content-type": "application/dns-json" } });
+    });
+    try {
+      await expect(validatePublicHttpsUrl(
+        "https://media.example.test/video.mp4?signature=test",
+        { allowQuery: true, purpose: "生成视频地址" },
+      )).resolves.toBe("https://media.example.test/video.mp4?signature=test");
+      expect(resolverHosts).toContain("cloudflare-dns.com");
+      expect(resolverHosts).toContain("dns.alidns.com");
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("通用公网 URL 校验不会继承火山方舟模型地址豁免", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const type = new URL(String(input)).searchParams.get("type");
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: type === "A" ? [{ type: 1, data: "180.184.47.154" }] : [],
+      }), { status: 200, headers: { "content-type": "application/dns-json" } });
+    });
+    try {
+      await expect(validatePublicHttpsUrl(
+        "https://ark.cn-beijing.volces.com/generated/video.mp4",
+        { purpose: "生成视频地址" },
+      )).resolves.toBe("https://ark.cn-beijing.volces.com/generated/video.mp4");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("任一 DNS 地址为私网时立即拒绝且不尝试其他解析器", async () => {
+    const resolverHosts: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      resolverHosts.push(url.hostname);
+      const type = url.searchParams.get("type");
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: type === "A" ? [{ type: 1, data: "10.0.0.8" }] : [],
+      }), { status: 200, headers: { "content-type": "application/dns-json" } });
+    });
+    try {
+      await expect(
+        validatePublicHttpsUrl("https://media.example.test/video.mp4"),
+      ).rejects.toMatchObject({ code: "UNSAFE_PUBLIC_URL" });
+      expect(resolverHosts).not.toContain("dns.alidns.com");
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("已观察到私网地址时不会因另一地址族失败而回退放行", async () => {
+    const resolverHosts: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      resolverHosts.push(url.hostname);
+      const type = url.searchParams.get("type");
+      if (url.hostname === "cloudflare-dns.com" && type === "AAAA") {
+        throw new Error("AAAA lookup unavailable");
+      }
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: type === "A"
+          ? [{ type: 1, data: url.hostname === "cloudflare-dns.com" ? "192.168.1.20" : "93.184.216.34" }]
+          : [],
+      }), { status: 200, headers: { "content-type": "application/dns-json" } });
+    });
+    try {
+      await expect(
+        validatePublicHttpsUrl("https://media.example.test/video.mp4"),
+      ).rejects.toMatchObject({ code: "UNSAFE_PUBLIC_URL" });
+      expect(resolverHosts).not.toContain("dns.alidns.com");
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("A 或 AAAA 任一地址族始终无法验证时保持失败关闭", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.searchParams.get("type") === "AAAA") throw new Error("AAAA lookup unavailable");
+      return new Response(JSON.stringify({
+        Status: 0,
+        Answer: [{ type: 1, data: "93.184.216.34" }],
+      }), { status: 200, headers: { "content-type": "application/dns-json" } });
+    });
+    try {
+      await expect(
+        validatePublicHttpsUrl("https://media.example.test/video.mp4"),
+      ).rejects.toMatchObject({ code: "PUBLIC_URL_DNS_FAILED" });
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   test("公网 HTTP 模型端点只允许显式配置的公共 IPv4 与端口", async () => {
     vi.mocked(bindings).mockReturnValue({ MODEL_HTTP_ENDPOINT_ALLOWLIST: "8.163.6.244:8317" });
 
