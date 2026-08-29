@@ -444,10 +444,436 @@ describe("AssetManager 审查项回归", () => {
     expect(within(dialog).getByText("韩立 · 保持角色一致性")).toBeVisible();
     expect(within(dialog).getByText("VIDEO_SUBMISSION_STATE_UNKNOWN")).toBeVisible();
     expect(within(dialog).getByText("cgt-details-1")).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "编辑参数后重新生成" })).toBeVisible();
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "韩立遨游乱星海" })).toBeNull());
     await waitFor(() => expect(openButton).toHaveFocus());
+
+    await user.click(openButton);
+    const reopenedDetails = screen.getByRole("dialog", { name: "韩立遨游乱星海" });
+    await user.click(within(reopenedDetails).getByRole("button", { name: "编辑参数后重新生成" }));
+    const editor = screen.getByRole("dialog", { name: "编辑参数后重新生成" });
+    expect(within(editor).getByRole("textbox", { name: "资产名称 *" })).toHaveValue("韩立遨游乱星海");
+    await user.click(within(editor).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(openButton).toHaveFocus());
+  });
+
+  test("原模型不可用时仍展示模型名与图片历史参数，并要求改选模型", async () => {
+    const fallbackModel = makeModel({
+      id: "fallback-image-model",
+      name: "当前图片模型",
+      modelId: "current-image-model",
+    });
+    const failedJob = makeGenerationJob({
+      id: "gen-removed-image-model",
+      clientRequestId: "request-removed-image-model",
+      modelId: "removed-image-model",
+      modelName: "旧版绘图模型",
+      mediaType: "image",
+      name: "历史竖版概念图",
+      prompt: "竖版人物概念设计",
+      aspectRatio: "2:3",
+      size: "800x1200",
+      status: "failed",
+      phase: "failed",
+      errorCode: "MODEL_DISABLED",
+      errorMessage: "原模型已停用。",
+      canRun: false,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([fallbackModel]);
+        if (url.endsWith("/characters") || url.endsWith("/assets")) return jsonResponse([]);
+        if (url.endsWith("/assets/generate") && !init?.method) {
+          return jsonResponse({ generations: [failedJob] });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+    await user.click(await screen.findByRole("button", {
+      name: "编辑参数后重新生成 历史竖版概念图",
+    }));
+
+    const dialog = screen.getByRole("dialog", { name: "编辑参数后重新生成" });
+    const modelSelect = within(dialog).getByRole("combobox", { name: "生成模型 *" });
+    expect(modelSelect).toHaveValue("removed-image-model");
+    expect(within(modelSelect).getByRole("option", {
+      name: "旧版绘图模型 · 原模型当前不可用",
+    })).toBeDisabled();
+    expect(within(dialog).getByRole("combobox", { name: "画幅" })).toHaveValue("2:3");
+    expect(within(dialog).getByRole("option", { name: "2:3（历史值，需确认）" })).toBeVisible();
+    expect(within(dialog).getByRole("textbox", { name: "自定义尺寸" })).toHaveValue("800x1200");
+    expect(within(dialog).getByRole("button", { name: "关闭编辑参数后重新生成" })).toBeVisible();
+
+    await user.click(within(dialog).getByRole("button", { name: "创建新的生成任务" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("原生成模型当前不可用");
+  });
+
+  test("失败卡可编辑完整参数并用全新请求创建任务，同时保留原失败记录", async () => {
+    const originalPrompt = "韩立御剑穿过乱星海，镜头从全景推进到人物近景。";
+    const editedPrompt = "韩立御剑穿过乱星海，镜头从全景推进到人物近景，增加雷云闪光。";
+    const model = makeModel({
+      id: "editable-video-model",
+      name: "可编辑视频模型",
+      modelId: "custom-video-model-v1",
+      parameters: {
+        capabilities: ["video-generation", "image-to-video"],
+        video: {
+          resolutions: ["720p", "1080p"],
+          defaultResolution: "720p",
+          aspectRatios: ["16:9", "9:16"],
+          defaultAspectRatio: "16:9",
+          minDuration: 4,
+          maxDuration: 12,
+          defaultDuration: 5,
+          supportsAutoDuration: false,
+          supportsGenerateAudio: true,
+          defaultGenerateAudio: false,
+          maxReferenceImages: 9,
+          referenceImageRoles: ["reference_image"],
+        },
+      },
+    });
+    const reference = makeAsset({ id: "ref-edit", name: "乱星海角色参考图" });
+    const relations = [{
+      targetType: "character" as const,
+      targetId: "character-edit",
+      relationType: "references",
+      note: "保持韩立造型一致",
+    }];
+    const failedJob = makeGenerationJob({
+      id: "gen-edit-source",
+      clientRequestId: "request-edit-source",
+      modelId: model.id,
+      modelName: model.name,
+      mediaType: "video",
+      name: "韩立遨游乱星海",
+      category: "scene",
+      prompt: originalPrompt,
+      aspectRatio: "16:9",
+      options: {
+        resolution: "720p",
+        duration: 8,
+        generateAudio: false,
+        referenceImages: [{ assetId: reference.id, role: "reference_image" }],
+      },
+      relations,
+      status: "failed",
+      phase: "failed",
+      progress: 15,
+      errorCode: "VIDEO_TASK_FAILED",
+      errorMessage: "服务商返回生成失败。",
+      retryable: true,
+      canRun: false,
+    });
+    let serverGenerations: AssetGenerationJob[] = [failedJob];
+    let createBody: Record<string, unknown> | undefined;
+    let createKey = "";
+    const postUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([model]);
+        if (url.endsWith("/characters")) {
+          return jsonResponse([{ id: "character-edit", name: "韩立" }]);
+        }
+        if (url.endsWith("/assets")) return jsonResponse([reference]);
+        if (url.endsWith("/assets/generate") && init?.method === "POST") {
+          postUrls.push(url);
+          createBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          createKey = new Headers(init.headers).get("Idempotency-Key") ?? "";
+          const createdJob = makeGenerationJob({
+            id: "gen-edit-new",
+            clientRequestId: String(createBody.clientRequestId),
+            modelId: model.id,
+            modelName: model.name,
+            mediaType: "video",
+            name: String(createBody.name),
+            category: "scene",
+            prompt: String(createBody.prompt),
+            aspectRatio: "16:9",
+            options: createBody.options as AssetGenerationJob["options"],
+            relations,
+            status: "queued",
+            phase: "queued",
+            canRun: false,
+          });
+          serverGenerations = [createdJob, failedJob];
+          return jsonResponse({ generation: createdJob });
+        }
+        if (url.endsWith("/assets/generate/gen-edit-new") && init?.method === "POST") {
+          postUrls.push(url);
+          return jsonResponse({ generation: serverGenerations[0] });
+        }
+        if (url.endsWith("/assets/generate")) {
+          return jsonResponse({ generations: serverGenerations });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+    await user.click(await screen.findByRole("button", {
+      name: "编辑参数后重新生成 韩立遨游乱星海",
+    }));
+
+    const dialog = screen.getByRole("dialog", { name: "编辑参数后重新生成" });
+    expect(within(dialog).getByRole("status")).toHaveTextContent("不会覆盖原失败任务");
+    expect(within(dialog).getByRole("combobox", { name: "生成模型 *" })).toHaveValue(model.id);
+    expect(within(dialog).getByRole("textbox", { name: "资产名称 *" })).toHaveValue("韩立遨游乱星海");
+    expect(within(dialog).getByRole("combobox", { name: "制作分类 *" })).toHaveValue("scene");
+    expect(within(dialog).getByRole("textbox", { name: "生成提示词 *" })).toHaveValue(originalPrompt);
+    expect(within(dialog).getByRole("combobox", { name: "画幅" })).toHaveValue("16:9");
+    expect(within(dialog).getByRole("combobox", { name: "分辨率" })).toHaveValue("720p");
+    expect(within(dialog).getByRole("combobox", { name: "视频时长" })).toHaveValue("8");
+    expect(within(dialog).getByRole("checkbox", { name: /生成同步音频/ })).not.toBeChecked();
+    expect(within(dialog).getByLabelText("已选参考图列表")).toHaveTextContent("乱星海角色参考图");
+    expect(within(dialog).getByText(/保持韩立造型一致/)).toBeVisible();
+
+    const promptInput = within(dialog).getByRole("textbox", { name: "生成提示词 *" });
+    await user.clear(promptInput);
+    await user.type(promptInput, editedPrompt);
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "视频时长" }), "10");
+    await user.click(within(dialog).getByRole("button", { name: "创建新的生成任务" }));
+
+    await waitFor(() => expect(createBody).toBeDefined());
+    expect(createKey).toBeTruthy();
+    expect(createKey).toBe(createBody?.clientRequestId);
+    expect(createKey).not.toBe(failedJob.clientRequestId);
+    expect(createBody).toMatchObject({
+      modelId: model.id,
+      mediaType: "video",
+      name: "韩立遨游乱星海",
+      category: "scene",
+      prompt: editedPrompt,
+      aspectRatio: "16:9",
+      options: {
+        resolution: "720p",
+        duration: 10,
+        generateAudio: false,
+        referenceImages: [{ assetId: reference.id, role: "reference_image" }],
+      },
+      relations,
+    });
+    expect(postUrls).not.toContain(expect.stringContaining("gen-edit-source"));
+    await waitFor(() => {
+      expect(screen.getAllByRole("heading", { name: "韩立遨游乱星海" })).toHaveLength(2);
+    });
+    expect(screen.getByText("VIDEO_TASK_FAILED")).toBeVisible();
+  });
+
+  test("官方受理状态不明的失败视频在编辑后新建前要求再次确认", async () => {
+    const model = makeModel({
+      id: "uncertain-video-model",
+      name: "状态确认视频模型",
+      modelId: "custom-video-model-v2",
+      parameters: {
+        capabilities: ["video-generation"],
+        video: {
+          resolutions: ["720p"],
+          defaultResolution: "720p",
+          aspectRatios: ["16:9"],
+          defaultAspectRatio: "16:9",
+          minDuration: 4,
+          maxDuration: 8,
+          defaultDuration: 5,
+          supportsGenerateAudio: false,
+          referenceImageRoles: ["reference_image"],
+        },
+      },
+    });
+    const failedJob = makeGenerationJob({
+      id: "gen-uncertain-source",
+      clientRequestId: "request-uncertain-source",
+      modelId: model.id,
+      modelName: model.name,
+      mediaType: "video",
+      name: "待核对的视频任务",
+      prompt: "云海中的人物镜头",
+      aspectRatio: "16:9",
+      options: { resolution: "720p", duration: 5, generateAudio: false },
+      status: "failed",
+      phase: "failed",
+      progress: 15,
+      errorCode: "VIDEO_SUBMISSION_STATE_UNKNOWN",
+      errorMessage: "视频任务提交状态无法确认。",
+      retryable: false,
+      canRun: false,
+      providerTaskId: null,
+    });
+    const confirmMock = vi.fn(() => false);
+    let collectionPosts = 0;
+    let serverGenerations = [failedJob];
+    vi.stubGlobal("confirm", confirmMock);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([model]);
+        if (url.endsWith("/characters") || url.endsWith("/assets")) return jsonResponse([]);
+        if (url.endsWith("/assets/generate") && init?.method === "POST") {
+          collectionPosts += 1;
+          const body = JSON.parse(String(init.body)) as { clientRequestId: string };
+          const createdJob = makeGenerationJob({
+            id: "gen-uncertain-new",
+            clientRequestId: body.clientRequestId,
+            modelId: model.id,
+            modelName: model.name,
+            mediaType: "video",
+            name: failedJob.name,
+            prompt: failedJob.prompt,
+            aspectRatio: "16:9",
+            options: failedJob.options,
+            status: "queued",
+            phase: "queued",
+            canRun: false,
+          });
+          serverGenerations = [createdJob, failedJob];
+          return jsonResponse({ generation: createdJob });
+        }
+        if (url.endsWith("/assets/generate/gen-uncertain-new") && init?.method === "POST") {
+          return jsonResponse({ generation: serverGenerations[0] });
+        }
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: serverGenerations });
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+    await user.click(await screen.findByRole("button", {
+      name: "编辑参数后重新生成 待核对的视频任务",
+    }));
+    const submit = screen.getByRole("button", { name: "创建新的生成任务" });
+    await user.click(submit);
+
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("仅当控制台没有匹配任务时才重新提交"));
+    expect(collectionPosts).toBe(0);
+    expect(screen.getByRole("dialog", { name: "编辑参数后重新生成" })).toBeVisible();
+
+    confirmMock.mockReturnValue(true);
+    await user.click(submit);
+    await waitFor(() => expect(collectionPosts).toBe(1));
+  });
+
+  test("模型能力变化时展示历史值并阻止静默改写，修正后才允许新建", async () => {
+    const model = makeModel({
+      id: "changed-video-model",
+      name: "能力已变更的视频模型",
+      modelId: "custom-video-model-v3",
+      parameters: {
+        capabilities: ["video-generation"],
+        video: {
+          resolutions: ["720p"],
+          defaultResolution: "720p",
+          aspectRatios: ["16:9"],
+          defaultAspectRatio: "16:9",
+          minDuration: 4,
+          maxDuration: 6,
+          defaultDuration: 5,
+          supportsGenerateAudio: false,
+          referenceImageRoles: [],
+        },
+      },
+    });
+    const reference = makeAsset({ id: "legacy-reference", name: "旧首帧图片" });
+    const failedJob = makeGenerationJob({
+      id: "gen-changed-profile",
+      clientRequestId: "request-changed-profile",
+      modelId: model.id,
+      modelName: model.name,
+      mediaType: "video",
+      name: "历史参数视频",
+      prompt: "保留旧参数供编辑",
+      aspectRatio: "21:9",
+      options: {
+        resolution: "1080p",
+        duration: 10,
+        generateAudio: true,
+        referenceImages: [{ assetId: reference.id, role: "first_frame" }],
+      },
+      status: "failed",
+      phase: "failed",
+      errorCode: "VIDEO_TASK_FAILED",
+      errorMessage: "模型能力已更新。",
+      canRun: false,
+    });
+    let createBody: { options?: Record<string, unknown> } | undefined;
+    let serverGenerations = [failedJob];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/models") return jsonResponse([model]);
+        if (url.endsWith("/characters")) return jsonResponse([]);
+        if (url.endsWith("/assets")) return jsonResponse([reference]);
+        if (url.endsWith("/assets/generate") && init?.method === "POST") {
+          createBody = JSON.parse(String(init.body)) as { options?: Record<string, unknown> };
+          const createdJob = makeGenerationJob({
+            id: "gen-changed-profile-new",
+            clientRequestId: "request-changed-profile-new",
+            modelId: model.id,
+            modelName: model.name,
+            mediaType: "video",
+            name: failedJob.name,
+            prompt: failedJob.prompt,
+            aspectRatio: "16:9",
+            options: createBody.options ?? {},
+            status: "queued",
+            phase: "queued",
+            canRun: false,
+          });
+          serverGenerations = [createdJob, failedJob];
+          return jsonResponse({ generation: createdJob });
+        }
+        if (url.endsWith("/assets/generate/gen-changed-profile-new") && init?.method === "POST") {
+          return jsonResponse({ generation: serverGenerations[0] });
+        }
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: serverGenerations });
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<AssetManager projectId="project-1" />);
+    await user.click(await screen.findByRole("button", {
+      name: "编辑参数后重新生成 历史参数视频",
+    }));
+    const dialog = screen.getByRole("dialog", { name: "编辑参数后重新生成" });
+    expect(within(dialog).getByRole("combobox", { name: "画幅" })).toHaveValue("21:9");
+    expect(within(dialog).getByRole("option", { name: /21:9（历史值/ })).toBeVisible();
+    expect(within(dialog).getByRole("combobox", { name: "分辨率" })).toHaveValue("1080p");
+    expect(within(dialog).getByRole("combobox", { name: "视频时长" })).toHaveValue("10");
+    expect(within(dialog).getByRole("checkbox", { name: /生成同步音频/ })).toBeChecked();
+    expect(within(dialog).getByText(/当前模型不再支持，请关闭音频或更换模型/)).toBeVisible();
+    expect(within(dialog).getByLabelText("已选参考图列表")).toHaveTextContent("旧首帧图片");
+
+    await user.click(within(dialog).getByRole("button", { name: "创建新的生成任务" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("不支持这个历史画幅");
+    expect(createBody).toBeUndefined();
+
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "画幅" }), "16:9");
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "分辨率" }), "720p");
+    await user.selectOptions(within(dialog).getByRole("combobox", { name: "视频时长" }), "5");
+    await user.click(within(dialog).getByRole("checkbox", { name: /生成同步音频/ }));
+    await user.click(within(dialog).getByRole("button", { name: "移除首帧" }));
+    await user.click(within(dialog).getByRole("button", { name: "创建新的生成任务" }));
+
+    await waitFor(() => expect(createBody).toBeDefined());
+    expect(createBody?.options).toMatchObject({
+      resolution: "720p",
+      duration: 5,
+      generateAudio: false,
+    });
+    expect(createBody?.options).not.toHaveProperty("referenceImages");
   });
 
   test("视频卡片展示官方离散状态，并把临时查询故障保留为生成中提示", async () => {

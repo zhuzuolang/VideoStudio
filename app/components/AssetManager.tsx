@@ -147,6 +147,7 @@ const EMPTY_GENERATE: GenerateForm = {
   referenceImageAssetIds: [],
   relations: [],
 };
+const IMAGE_ASPECT_RATIOS = ["1:1", "9:16", "16:9", "3:4", "4:3"];
 
 function isHttpUrl(value: string): boolean {
   try {
@@ -276,6 +277,35 @@ function referenceRole(mode: VideoReferenceMode, index: number): VideoReferenceI
   return "reference_image";
 }
 
+function submittedReferenceMode(
+  references: readonly { role: VideoReferenceImageRole }[],
+): VideoReferenceMode | null {
+  if (references.length === 0 || references.every((reference) => reference.role === "reference_image")) {
+    return "reference_image";
+  }
+  if (references.length === 1 && references[0].role === "first_frame") return "first_frame";
+  if (
+    references.length === 2
+    && references[0].role === "first_frame"
+    && references[1].role === "last_frame"
+  ) return "first_last_frame";
+  return null;
+}
+
+function supportsReferenceMode(mode: VideoReferenceMode, config: ModelVideoConfig): boolean {
+  if (mode === "reference_image") return config.referenceImageRoles.includes("reference_image");
+  if (mode === "first_frame") return config.referenceImageRoles.includes("first_frame");
+  return config.referenceImageRoles.includes("first_frame")
+    && config.referenceImageRoles.includes("last_frame");
+}
+
+function supportsVideoDuration(duration: number, config: ModelVideoConfig): boolean {
+  return Number.isInteger(duration)
+    && (duration === -1
+      ? config.supportsAutoDuration
+      : duration >= config.minDuration && duration <= config.maxDuration);
+}
+
 function isDefinitiveGenerationSubmissionFailure(reason: unknown): boolean {
   return reason instanceof PlatformApiError && new Set([
     "VALIDATION_ERROR",
@@ -354,6 +384,17 @@ function generationRetryConfirmation(generation: AssetGenerationJob): string {
     return "原官方视频任务已经结束。重试将创建新的官方视频任务，并可能再次计费。确定继续吗？";
   }
   return "该失败无法安全自动重试。再次尝试可能重新调用模型并产生费用，也可能因原配置或内容问题再次失败。确定继续吗？";
+}
+
+function regenerationConfirmation(generation: AssetGenerationJob): string | null {
+  if (generation.mediaType !== "video") return null;
+  if (generation.providerTaskId && canResumeExistingVideoTask(generation)) {
+    return `原任务已有官方任务 ID（${generation.providerTaskId}），可能仍可直接恢复。使用编辑后的参数会创建另一个官方视频任务，并可能再次计费。确定创建新任务吗？`;
+  }
+  if (generation.providerTaskId || UNCERTAIN_VIDEO_SUBMISSION_CODES.has(generation.errorCode || "")) {
+    return generationRetryConfirmation(generation);
+  }
+  return null;
 }
 
 function canResumeExistingVideoTask(generation: AssetGenerationJob): boolean {
@@ -444,12 +485,14 @@ function GenerationCard({
   generation,
   processing,
   onOpen,
+  onEditAndRegenerate,
   onRetry,
   onDismiss,
 }: {
   generation: AssetGenerationJob;
   processing: boolean;
   onOpen: (generation: AssetGenerationJob) => void;
+  onEditAndRegenerate: (generation: AssetGenerationJob) => void;
   onRetry: (generation: AssetGenerationJob) => void;
   onDismiss: (generation: AssetGenerationJob) => void;
 }) {
@@ -549,6 +592,18 @@ function GenerationCard({
               >
                 <Eye size={12} /> 查看参数
               </button>
+              {failed && (
+                <button
+                  type="button"
+                  className={styles.textButton}
+                  onClick={() => onEditAndRegenerate(generation)}
+                  disabled={processing}
+                  aria-label={`编辑参数后重新生成 ${generation.name}`}
+                  aria-haspopup="dialog"
+                >
+                  <Pencil size={12} /> 编辑后再生成
+                </button>
+              )}
               {retryAvailable && (
                 <button
                   type="button"
@@ -605,6 +660,7 @@ function GenerationDetailsDialog({
   characters,
   closeButtonRef,
   onClose,
+  onEditAndRegenerate,
 }: {
   generation: AssetGenerationJob;
   models: AiModel[];
@@ -612,6 +668,7 @@ function GenerationDetailsDialog({
   characters: CharacterOption[];
   closeButtonRef: RefObject<HTMLButtonElement | null>;
   onClose: () => void;
+  onEditAndRegenerate: (generation: AssetGenerationJob) => void;
 }) {
   const configuredModel = models.find((model) => model.id === generation.modelId);
   const references = generation.options.referenceImages ?? [];
@@ -726,7 +783,16 @@ function GenerationDetailsDialog({
           </section>
         </div>
         <footer className={styles.dialogFooter}>
-          <button type="button" className={styles.primaryButton} onClick={onClose}>关闭</button>
+          <button type="button" className={failed ? styles.secondaryButton : styles.primaryButton} onClick={onClose}>关闭</button>
+          {failed && (
+            <button
+              type="button"
+              className={styles.primaryButton}
+              onClick={() => onEditAndRegenerate(generation)}
+            >
+              <Pencil size={14} /> 编辑参数后重新生成
+            </button>
+          )}
         </footer>
       </div>
     </div>
@@ -894,6 +960,7 @@ export default function AssetManager({
   const [dialog, setDialog] = useState<DialogMode>(null);
   const [editing, setEditing] = useState<ProjectAsset | null>(null);
   const [viewingGenerationRequestId, setViewingGenerationRequestId] = useState<string | null>(null);
+  const [regeneratingFromRequestId, setRegeneratingFromRequestId] = useState<string | null>(null);
   const [previewingAssetId, setPreviewingAssetId] = useState<string | null>(null);
   const [previewTab, setPreviewTab] = useState<"preview" | "relations">("preview");
   const [previewRelations, setPreviewRelations] = useState<AssetRelationInput[]>([]);
@@ -918,8 +985,12 @@ export default function AssetManager({
   const activeProjectRef = useRef(projectId);
   const processingGenerationIds = useRef<Set<string>>(new Set());
   const dismissingGenerationIds = useRef<Set<string>>(new Set());
+  const generationSubmissionInFlightRef = useRef(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const generationDetailCloseRef = useRef<HTMLButtonElement>(null);
+  const generationDetailsOriginRef = useRef<HTMLElement | null>(null);
+  const regenerationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const suppressGenerationDetailFocusRestoreRef = useRef(false);
   const previewCloseRef = useRef<HTMLButtonElement>(null);
   const onAssetsChangeRef = useRef(onAssetsChange);
   useEffect(() => {
@@ -928,6 +999,11 @@ export default function AssetManager({
   useEffect(() => {
     activeProjectRef.current = projectId;
   }, [projectId]);
+  const restoreRegenerationFocus = useCallback(() => {
+    const target = regenerationReturnFocusRef.current;
+    regenerationReturnFocusRef.current = null;
+    if (target?.isConnected) window.setTimeout(() => target.focus(), 0);
+  }, []);
 
   const loadCharacters = useCallback(async () => {
     const sequence = ++characterRequestSequence.current;
@@ -1073,6 +1149,9 @@ export default function AssetManager({
       setRelationFilter("all");
       setDialog(null);
       setViewingGenerationRequestId(null);
+      setRegeneratingFromRequestId(null);
+      generationDetailsOriginRef.current = null;
+      regenerationReturnFocusRef.current = null;
       setCharacters([]);
       setModels([]);
       setGenerations([]);
@@ -1138,12 +1217,15 @@ export default function AssetManager({
         event.key === "Escape" &&
         !saving &&
         (!dirty || window.confirm("当前修改尚未保存，确定关闭吗？"))
-      )
+      ) {
         setDialog(null);
+        setRegeneratingFromRequestId(null);
+        restoreRegenerationFocus();
+      }
     };
     addEventListener("keydown", listener);
     return () => removeEventListener("keydown", listener);
-  }, [dialog, dirty, saving]);
+  }, [dialog, dirty, restoreRegenerationFocus, saving]);
   useEffect(() => {
     if (!viewingGenerationRequestId) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -1155,7 +1237,13 @@ export default function AssetManager({
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("keydown", listener);
-      if (previouslyFocused?.isConnected) window.setTimeout(() => previouslyFocused.focus(), 0);
+      if (suppressGenerationDetailFocusRestoreRef.current) {
+        suppressGenerationDetailFocusRestoreRef.current = false;
+      } else {
+        const target = generationDetailsOriginRef.current ?? previouslyFocused;
+        generationDetailsOriginRef.current = null;
+        if (target?.isConnected) window.setTimeout(() => target.focus(), 0);
+      }
     };
   }, [viewingGenerationRequestId]);
   useEffect(() => {
@@ -1178,7 +1266,23 @@ export default function AssetManager({
     () => eligibleModels.find((model) => model.id === generateForm.modelId),
     [eligibleModels, generateForm.modelId],
   );
+  const regenerationSource = useMemo(
+    () => regeneratingFromRequestId
+      ? generations.find((generation) => generation.clientRequestId === regeneratingFromRequestId)
+      : undefined,
+    [generations, regeneratingFromRequestId],
+  );
   const selectedVideoConfig = useMemo(() => modelVideoConfig(selectedGenerationModel), [selectedGenerationModel]);
+  const aspectRatioOptions = generateForm.mediaType === "video"
+    ? selectedVideoConfig.aspectRatios
+    : IMAGE_ASPECT_RATIOS;
+  const aspectRatioSupported = aspectRatioOptions.includes(generateForm.aspectRatio);
+  const videoAspectRatioSupported = selectedVideoConfig.aspectRatios.includes(generateForm.aspectRatio);
+  const videoResolutionSupported = selectedVideoConfig.resolutions.includes(generateForm.resolution);
+  const videoDurationSupported = supportsVideoDuration(generateForm.duration, selectedVideoConfig);
+  const videoReferenceModeSupported = generateForm.referenceImageAssetIds.length === 0
+    || supportsReferenceMode(generateForm.referenceMode, selectedVideoConfig);
+  const videoAudioSupported = !generateForm.generateAudio || selectedVideoConfig.supportsGenerateAudio;
   const referenceModeOptions = useMemo(() => {
     const options: Array<{ value: VideoReferenceMode; label: string }> = [];
     if (selectedVideoConfig.referenceImageRoles.includes("reference_image")) {
@@ -1191,8 +1295,21 @@ export default function AssetManager({
       && selectedVideoConfig.referenceImageRoles.includes("last_frame")) {
       options.push({ value: "first_last_frame", label: "首帧 + 尾帧" });
     }
+    if (regeneratingFromRequestId
+      && generateForm.referenceImageAssetIds.length > 0
+      && !options.some((option) => option.value === generateForm.referenceMode)) {
+      const historicalLabel = generateForm.referenceMode === "reference_image"
+        ? "内容参考"
+        : generateForm.referenceMode === "first_frame"
+          ? "首帧"
+          : "首帧 + 尾帧";
+      options.unshift({
+        value: generateForm.referenceMode,
+        label: `${historicalLabel}（历史值，当前模型不支持）`,
+      });
+    }
     return options;
-  }, [selectedVideoConfig]);
+  }, [generateForm.referenceImageAssetIds.length, generateForm.referenceMode, regeneratingFromRequestId, selectedVideoConfig]);
   const referenceImageLimit = referenceModeLimit(generateForm.referenceMode, selectedVideoConfig);
   const selectableReferenceAssets = useMemo(() => assets.filter((asset) =>
     asset.mediaType === "image"
@@ -1304,6 +1421,8 @@ export default function AssetManager({
   }
 
   function openCreate() {
+    setRegeneratingFromRequestId(null);
+    regenerationReturnFocusRef.current = null;
     setEditing(null);
     setForm(EMPTY_ASSET);
     setFile(null);
@@ -1314,6 +1433,8 @@ export default function AssetManager({
     setDialog("asset");
   }
   function openEdit(asset: ProjectAsset) {
+    setRegeneratingFromRequestId(null);
+    regenerationReturnFocusRef.current = null;
     setEditing(asset);
     setSourceMode("url");
     setFile(null);
@@ -1332,6 +1453,8 @@ export default function AssetManager({
     setDialog("asset");
   }
   function openGenerate() {
+    setRegeneratingFromRequestId(null);
+    regenerationReturnFocusRef.current = null;
     const model = eligibleModels[0];
     const video = model && isVideoModel(model);
     const config = modelVideoConfig(video ? model : undefined);
@@ -1350,10 +1473,91 @@ export default function AssetManager({
     setRelationsDirty(false);
     setDialog("generate");
   }
+  function openGenerationDetails(generation: AssetGenerationJob) {
+    generationDetailsOriginRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setViewingGenerationRequestId(generation.clientRequestId);
+  }
+  function openGenerationEditor(generation: AssetGenerationJob) {
+    const video = generation.mediaType === "video";
+    const configuredModel = generation.modelId
+      ? eligibleModels.find((model) => model.id === generation.modelId
+        && (video ? isVideoModel(model) : isImageModel(model)))
+      : undefined;
+    const config = modelVideoConfig(video ? configuredModel : undefined);
+    const references = video ? generation.options.referenceImages ?? [] : [];
+    const historicalMode = submittedReferenceMode(references);
+    const referenceMode = historicalMode ?? defaultReferenceMode(config);
+    const aspectRatio = generation.aspectRatio
+      || (video ? config.defaultAspectRatio : EMPTY_GENERATE.aspectRatio);
+    const resolution = generation.options.resolution ?? config.defaultResolution;
+    const duration = generation.options.duration ?? config.defaultDuration;
+    const generateAudio = generation.options.generateAudio ?? config.defaultGenerateAudio;
+    const warnings: string[] = [];
+    if (!configuredModel) warnings.push("原生成模型当前不可用，请重新选择模型。");
+    if (video && configuredModel && !config.aspectRatios.includes(aspectRatio)) {
+      warnings.push("原画幅是历史值，当前模型已不支持；提交前请重新选择。");
+    }
+    if (video && configuredModel && !config.resolutions.includes(resolution)) {
+      warnings.push("原分辨率是历史值，当前模型已不支持；提交前请重新选择。");
+    }
+    if (video && configuredModel && !supportsVideoDuration(duration, config)) {
+      warnings.push("原视频时长是历史值，当前模型已不支持；提交前请重新选择。");
+    }
+    if (video && configuredModel && generateAudio && !config.supportsGenerateAudio) {
+      warnings.push("原任务启用了同步音频，但当前模型已不支持；请关闭音频或更换模型。");
+    }
+    if (video && references.length > 0 && !historicalMode) {
+      warnings.push("原参考图角色组合无法自动还原，请重新选择参考方式和图片。");
+    } else if (video && configuredModel && references.length > 0 && historicalMode
+      && !supportsReferenceMode(historicalMode, config)) {
+      warnings.push("原参考方式是历史值，当前模型已不支持；请重新选择参考方式和图片。");
+    }
+    if (video && generation.options.referenceImageUrl) {
+      warnings.push("旧任务使用了外部链接参考图，无法自动带入；请从项目图片中重新选择。");
+    }
+    setGenerateForm({
+      ...EMPTY_GENERATE,
+      modelId: configuredModel?.id ?? generation.modelId ?? "",
+      mediaType: generation.mediaType,
+      name: generation.name,
+      category: generation.category,
+      prompt: generation.prompt,
+      aspectRatio,
+      size: generation.size ?? "",
+      resolution,
+      duration,
+      generateAudio,
+      referenceMode,
+      referenceImageAssetIds: historicalMode
+        ? references.map((reference) => reference.assetId)
+        : [],
+      relations: generation.relations.map((relation) => ({ ...relation })),
+    });
+    if (viewingGenerationRequestId) {
+      regenerationReturnFocusRef.current = generationDetailsOriginRef.current;
+      generationDetailsOriginRef.current = null;
+      suppressGenerationDetailFocusRestoreRef.current = true;
+    } else {
+      regenerationReturnFocusRef.current = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    }
+    setViewingGenerationRequestId(null);
+    setRegeneratingFromRequestId(generation.clientRequestId);
+    setFormError(warnings.join(" "));
+    setDirty(false);
+    setRelationsDirty(false);
+    setDialog("generate");
+  }
   function closeDialog() {
     if (saving || (dirty && !window.confirm("当前修改尚未保存，确定关闭吗？")))
       return;
+    const restoreFocus = Boolean(regeneratingFromRequestId);
     setDialog(null);
+    setRegeneratingFromRequestId(null);
+    if (restoreFocus) restoreRegenerationFocus();
   }
   function updateForm<K extends keyof AssetForm>(key: K, value: AssetForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -1523,9 +1727,35 @@ export default function AssetManager({
   }
   async function generateAsset(event: React.FormEvent) {
     event.preventDefault();
+    if (generationSubmissionInFlightRef.current) return;
     if (!generateForm.modelId) return setFormError("请选择已配置的图片或视频模型。");
     if (!generateForm.name.trim() || !generateForm.prompt.trim())
       return setFormError("请填写资产名称与提示词。");
+    if (!selectedGenerationModel) {
+      return setFormError("原生成模型当前不可用，请重新选择模型。");
+    }
+    if (generateForm.mediaType === "video"
+      && !isVideoModel(selectedGenerationModel)) {
+      return setFormError("所选模型当前不支持视频生成，请重新选择。");
+    }
+    if (generateForm.mediaType === "image" && !isImageModel(selectedGenerationModel)) {
+      return setFormError("所选模型当前不支持图片生成，请重新选择。");
+    }
+    if (generateForm.mediaType === "video" && !videoAspectRatioSupported) {
+      return setFormError("当前模型不支持这个历史画幅，请重新选择画幅。");
+    }
+    if (generateForm.mediaType === "video" && !videoResolutionSupported) {
+      return setFormError("当前模型不支持这个历史分辨率，请重新选择分辨率。");
+    }
+    if (generateForm.mediaType === "video" && !videoDurationSupported) {
+      return setFormError("当前模型不支持这个历史视频时长，请重新选择时长。");
+    }
+    if (generateForm.mediaType === "video" && !videoAudioSupported) {
+      return setFormError("当前模型不支持生成同步音频，请关闭音频或更换模型。");
+    }
+    if (generateForm.mediaType === "video" && !videoReferenceModeSupported) {
+      return setFormError("当前模型不支持这个历史参考方式，请重新选择参考方式和图片。");
+    }
     if (generateForm.mediaType === "video"
       && generateForm.referenceImageAssetIds.some((assetId) => !selectableReferenceAssets.some((asset) => asset.id === assetId))) {
       return setFormError("部分参考图已不可用，请重新选择。");
@@ -1544,6 +1774,10 @@ export default function AssetManager({
           role: referenceRole(generateForm.referenceMode, index),
         }))
       : [];
+    const confirmationMessage = regenerationSource
+      ? regenerationConfirmation(regenerationSource)
+      : null;
+    if (confirmationMessage && !window.confirm(confirmationMessage)) return;
     const snapshot = {
       ...generateForm,
       name: generateForm.name.trim(),
@@ -1552,6 +1786,7 @@ export default function AssetManager({
       referenceImages,
     };
     const clientRequestId = crypto.randomUUID();
+    generationSubmissionInFlightRef.current = true;
     const submissionProjectId = projectId;
     const now = new Date().toISOString();
     const optimistic: AssetGenerationJob = {
@@ -1587,8 +1822,11 @@ export default function AssetManager({
       startedAt: null,
       completedAt: null,
     };
+    const restoreFocus = Boolean(regeneratingFromRequestId);
     setGenerations((current) => [optimistic, ...current]);
     setDialog(null);
+    setRegeneratingFromRequestId(null);
+    if (restoreFocus) restoreRegenerationFocus();
     setDirty(false);
     setMediaFilter("all");
     setCategoryFilter("all");
@@ -1653,6 +1891,7 @@ export default function AssetManager({
           : generation));
       }
     } finally {
+      generationSubmissionInFlightRef.current = false;
       setSaving(false);
     }
   }
@@ -1902,7 +2141,8 @@ export default function AssetManager({
                     key={generation.id}
                     generation={generation}
                     processing={generation.status === "running"}
-                    onOpen={(generation) => setViewingGenerationRequestId(generation.clientRequestId)}
+                    onOpen={openGenerationDetails}
+                    onEditAndRegenerate={openGenerationEditor}
                     onRetry={retryGeneration}
                     onDismiss={(generation) => void dismissGeneration(generation)}
                   />
@@ -2144,6 +2384,7 @@ export default function AssetManager({
           characters={characters}
           closeButtonRef={generationDetailCloseRef}
           onClose={() => setViewingGenerationRequestId(null)}
+          onEditAndRegenerate={openGenerationEditor}
         />
       )}
       {previewingAsset && (
@@ -2491,13 +2732,15 @@ export default function AssetManager({
             <form onSubmit={generateAsset}>
               <header className={styles.dialogHeader}>
                 <div>
-                  <h2 id="generate-asset-title">AI 创建资产</h2>
-                  <p>提交后会立即建立任务卡片；页面中断时任务会保留，再次进入资产中心后自动恢复。</p>
+                  <h2 id="generate-asset-title">{regeneratingFromRequestId ? "编辑参数后重新生成" : "AI 创建资产"}</h2>
+                  <p>{regeneratingFromRequestId
+                    ? "已带入失败任务的原始参数；提交后会创建新任务，原失败记录仍会保留。"
+                    : "提交后会立即建立任务卡片；页面中断时任务会保留，再次进入资产中心后自动恢复。"}</p>
                 </div>
                 <button
                   className={styles.iconButton}
                   type="button"
-                  aria-label="关闭 AI 创建资产"
+                  aria-label={regeneratingFromRequestId ? "关闭编辑参数后重新生成" : "关闭 AI 创建资产"}
                   onClick={closeDialog}
                   disabled={saving}
                 >
@@ -2505,6 +2748,12 @@ export default function AssetManager({
                 </button>
               </header>
               <div className={styles.dialogBody}>
+                {regeneratingFromRequestId && (
+                  <div className={joinClassNames(styles.notice, styles.noticeWarning)} role="status">
+                    <AlertCircle size={15} aria-hidden="true" />
+                    <span><b>这是一次新的生成请求。</b> 修改完成后提交可能再次产生模型费用，不会覆盖原失败任务。</span>
+                  </div>
+                )}
                 <fieldset
                   className={joinClassNames(styles.formGrid, styles.formShell)}
                   disabled={saving}
@@ -2517,6 +2766,14 @@ export default function AssetManager({
                       onChange={(event) => selectGenerateModel(event.target.value)}
                     >
                       <option value="">请选择模型</option>
+                      {regenerationSource
+                        && generateForm.modelId === regenerationSource.modelId
+                        && !selectedGenerationModel
+                        && (
+                          <option value={regenerationSource.modelId ?? ""} disabled>
+                            {regenerationSource.modelName} · 原模型当前不可用
+                          </option>
+                        )}
                       {eligibleModels.map((model) => (
                         <option key={model.id} value={model.id}>
                           {model.name} · {isVideoModel(model) ? "视频" : "图片"}
@@ -2576,10 +2833,10 @@ export default function AssetManager({
                       value={generateForm.aspectRatio}
                       onChange={(event) => updateGenerate("aspectRatio", event.target.value)}
                     >
-                      {(generateForm.mediaType === "video"
-                        ? selectedVideoConfig.aspectRatios
-                        : ["1:1", "9:16", "16:9", "3:4", "4:3"]
-                      ).map((ratio) => <option key={ratio}>{ratio}</option>)}
+                      {regeneratingFromRequestId
+                        && !aspectRatioSupported
+                        && <option value={generateForm.aspectRatio}>{generateForm.aspectRatio}（历史值，需确认）</option>}
+                      {aspectRatioOptions.map((ratio) => <option key={ratio}>{ratio}</option>)}
                     </select>
                   </div>
                   {generateForm.mediaType === "image" ? (
@@ -2596,6 +2853,8 @@ export default function AssetManager({
                     <div className={styles.field}>
                       <label htmlFor="generate-resolution">分辨率</label>
                       <select id="generate-resolution" value={generateForm.resolution} onChange={(event) => updateGenerate("resolution", event.target.value)}>
+                        {regeneratingFromRequestId && !videoResolutionSupported
+                          && <option value={generateForm.resolution}>{generateForm.resolution}（历史值，当前模型不支持）</option>}
                         {selectedVideoConfig.resolutions.map((resolution) => <option key={resolution}>{resolution}</option>)}
                       </select>
                     </div>
@@ -2606,6 +2865,8 @@ export default function AssetManager({
                         value={generateForm.duration}
                         onChange={(event) => updateGenerate("duration", Number(event.target.value))}
                       >
+                        {regeneratingFromRequestId && !videoDurationSupported
+                          && <option value={generateForm.duration}>{generateForm.duration === -1 ? "智能时长" : `${generateForm.duration} 秒`}（历史值，当前模型不支持）</option>}
                         {selectedVideoConfig.supportsAutoDuration && <option value={-1}>智能时长</option>}
                         {Array.from(
                           { length: selectedVideoConfig.maxDuration - selectedVideoConfig.minDuration + 1 },
@@ -2617,7 +2878,8 @@ export default function AssetManager({
                         {selectedVideoConfig.supportsAutoDuration ? "，或由模型智能选择" : ""}
                       </span>
                     </div>
-                    {selectedVideoConfig.referenceImageRoles.length > 0 && (
+                    {(selectedVideoConfig.referenceImageRoles.length > 0
+                      || Boolean(regeneratingFromRequestId && generateForm.referenceImageAssetIds.length > 0)) && (
                       <fieldset className={joinClassNames(styles.fieldset, styles.referenceAssetEditor)}>
                         <legend>参考图（可选）</legend>
                         <div className={styles.referenceAssetToolbar}>
@@ -2638,11 +2900,15 @@ export default function AssetManager({
                             <select
                               aria-label="添加项目图片"
                               value=""
-                              disabled={generateForm.referenceImageAssetIds.length >= referenceImageLimit || availableReferenceAssets.length === 0}
+                              disabled={!supportsReferenceMode(generateForm.referenceMode, selectedVideoConfig)
+                                || generateForm.referenceImageAssetIds.length >= referenceImageLimit
+                                || availableReferenceAssets.length === 0}
                               onChange={(event) => addReferenceAsset(event.target.value)}
                             >
                               <option value="">
-                                {generateForm.referenceImageAssetIds.length >= referenceImageLimit
+                                {!supportsReferenceMode(generateForm.referenceMode, selectedVideoConfig)
+                                  ? "当前模型不支持此参考方式"
+                                  : generateForm.referenceImageAssetIds.length >= referenceImageLimit
                                   ? `已达到 ${referenceImageLimit} 张上限`
                                   : availableReferenceAssets.length === 0
                                     ? "没有可添加的项目图片"
@@ -2726,11 +2992,17 @@ export default function AssetManager({
                         <span className={styles.fieldHint}>项目内图片会由服务端安全读取；本地文件单张不超过 8 MB、合计不超过 24 MB。</span>
                       </fieldset>
                     )}
-                    {selectedVideoConfig.supportsGenerateAudio && (
+                    {(selectedVideoConfig.supportsGenerateAudio
+                      || Boolean(regeneratingFromRequestId && generateForm.generateAudio)) && (
                       <div className={styles.fieldFull}>
                         <label className={styles.checkboxLine}>
                           <input type="checkbox" checked={generateForm.generateAudio} onChange={(event) => updateGenerate("generateAudio", event.target.checked)} />
-                          <span><b>生成同步音频</b><small>模型会同时生成对白、环境音或配乐；这会影响 Token 费用。</small></span>
+                          <span>
+                            <b>生成同步音频</b>
+                            <small>{selectedVideoConfig.supportsGenerateAudio
+                              ? "模型会同时生成对白、环境音或配乐；这会影响 Token 费用。"
+                              : "这是历史任务中的设置；当前模型不再支持，请关闭音频或更换模型。"}</small>
+                          </span>
                         </label>
                       </div>
                     )}
@@ -2773,7 +3045,7 @@ export default function AssetManager({
                   ) : (
                     <Sparkles size={14} />
                   )}
-                  创建生成任务
+                  {regeneratingFromRequestId ? "创建新的生成任务" : "创建生成任务"}
                 </button>
               </footer>
             </form>
