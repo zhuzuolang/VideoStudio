@@ -21,6 +21,7 @@ describe("资产双维分类", () => {
   test("介质属性与制作分类独立校验", () => {
     expect(validateAssetMediaType("image")).toBe("image");
     expect(validateAssetCategory("character")).toBe("character");
+    expect(validateAssetCategory("final")).toBe("final");
     expect(() => validateAssetMediaType("character")).toThrow(/介质属性/);
     expect(() => validateAssetCategory("image")).toThrow(/制作分类/);
   });

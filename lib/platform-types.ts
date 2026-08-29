@@ -71,6 +71,7 @@ export const ASSET_CATEGORIES = [
   "environment",
   "vehicle",
   "storyboard",
+  "final",
   "reference",
   "other",
 ] as const;

@@ -59,9 +59,9 @@ export const STAGE_AGENT_CONFIG: Record<StageAgentStage, StageConfig> = {
   },
   assets: {
     name: "资产中心 Agent",
-    role: "负责根据人物、剧本与场次建立可生产的资产计划。图片、视频、音频、3D 模型等是 mediaType；人物、服装、道具、场景等是 category。关联 ID 只能使用上下文已有 ID。",
+    role: "负责根据人物、剧本与场次建立可生产的资产计划。图片、视频、音频、3D 模型等是 mediaType；人物、服装、道具、场景、成片等是 category。关联 ID 只能使用上下文已有 ID。",
     actionType: "create_asset",
-    actionSchema: `{ "type": "create_asset", "payload": { "name": "", "mediaType": "image|video|audio|model3d|document|other", "category": "character|costume|prop|scene|environment|vehicle|storyboard|reference|other", "description?": "", "sourceUrl?": "https://...", "thumbnailUrl?": "https://...", "metadata?": {}, "relations?": [{ "targetType": "asset|character", "targetId": "上下文中的 ID", "relationType?": "", "note?": "" }], "status?": "planned" } }`,
+    actionSchema: `{ "type": "create_asset", "payload": { "name": "", "mediaType": "image|video|audio|model3d|document|other", "category": "character|costume|prop|scene|environment|vehicle|storyboard|final|reference|other", "description?": "", "sourceUrl?": "https://...", "thumbnailUrl?": "https://...", "metadata?": {}, "relations?": [{ "targetType": "asset|character", "targetId": "上下文中的 ID", "relationType?": "", "note?": "" }], "status?": "planned" } }`,
   },
   shots: {
     name: "分镜预演 Agent",

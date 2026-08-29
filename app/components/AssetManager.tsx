@@ -13,6 +13,7 @@ import {
   ExternalLink,
   Eye,
   FileText,
+  Film,
   Image as ImageIcon,
   Link2,
   LoaderCircle,
@@ -118,6 +119,7 @@ const CATEGORY_META: Record<
   environment: { label: "环境", icon: MapPin },
   vehicle: { label: "载具", icon: Package },
   storyboard: { label: "故事板", icon: FileText },
+  final: { label: "成片", icon: Film },
   reference: { label: "参考", icon: ImageIcon },
   other: { label: "其他", icon: Package },
 };

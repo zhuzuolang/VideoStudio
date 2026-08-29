@@ -4,7 +4,7 @@ import type { AssetRelationInput } from "../platform-types";
 
 export const ASSET_MEDIA_TYPES = new Set(["image", "audio", "video", "model3d", "document", "other"]);
 export const ASSET_CATEGORIES = new Set([
-  "character", "costume", "prop", "scene", "environment", "vehicle", "storyboard", "reference", "other",
+  "character", "costume", "prop", "scene", "environment", "vehicle", "storyboard", "final", "reference", "other",
 ]);
 
 export function validateAssetMediaType(value: unknown): string {

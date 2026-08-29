@@ -232,7 +232,9 @@ describe("关键按钮点击回归", () => {
     expect(screen.getByRole("dialog", { name: "新增项目资产" })).toBeVisible();
     expect(screen.getByRole("textbox", { name: /资产名称/ })).toBeVisible();
     expect(screen.getByRole("combobox", { name: /介质属性/ })).toBeVisible();
-    expect(screen.getByRole("combobox", { name: /制作分类/ })).toBeVisible();
+    const categorySelect = screen.getByRole("combobox", { name: /制作分类/ });
+    expect(categorySelect).toBeVisible();
+    expect(within(categorySelect).getByRole("option", { name: "成片" })).toHaveValue("final");
   });
 
   test("AssetManager 点击“AI 创建资产”显示生成 dialog", async () => {
