@@ -57,9 +57,9 @@ export function serializeAssetGeneration(row: Record<string, unknown>): AssetGen
     attemptCount,
     errorCode: typeof row.errorCode === "string" ? row.errorCode : null,
     errorMessage: typeof row.errorMessage === "string" ? row.errorMessage : null,
-    retryable: Boolean(row.retryable) && attemptCount < 3,
+    retryable: Boolean(row.retryable) && (Boolean(providerTaskId) || attemptCount < 3),
     assetId: typeof row.assetId === "string" ? row.assetId : null,
-    canRun: !dismissedAt && !submissionStateUnknown && attemptCount < 3 && pollDue
+    canRun: !dismissedAt && !submissionStateUnknown && (Boolean(providerTaskId) || attemptCount < 3) && pollDue
       && (status === "queued" || (status === "running" && leaseExpired)),
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt),
@@ -94,7 +94,7 @@ export async function listAssetGenerations(
       error_message = '任务在执行中断后已达到 3 次自动恢复上限，请检查模型配置后新建任务。',
       lease_token = NULL, lease_expires_at = NULL, updated_at = ?, completed_at = ?
     WHERE project_id = ? AND owner_id = ? AND dismissed_at IS NULL
-      AND status = 'running' AND attempt_count >= 3
+      AND status = 'running' AND provider_task_id IS NULL AND attempt_count >= 3
       AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`)
     .bind(now, now, projectId, ownerId, now)
     .run();
@@ -154,12 +154,21 @@ export async function releaseGenerationForPolling(
   leaseToken: string,
   progress: number,
   pollAfterMs = 5_000,
+  notice?: Pick<GenerationFailure, "code" | "message">,
 ): Promise<void> {
   const result = await db.prepare(`UPDATE asset_generation_jobs SET
-      status = 'running', phase = 'model', progress = ?, next_poll_at = ?,
+      status = 'running', phase = 'model', progress = ?, error_code = ?, error_message = ?, next_poll_at = ?,
       lease_token = NULL, lease_expires_at = NULL, updated_at = ?
     WHERE id = ? AND status = 'running' AND lease_token = ? AND provider_task_id IS NOT NULL`)
-    .bind(Math.max(25, Math.min(75, progress)), new Date(Date.now() + pollAfterMs).toISOString(), nowIso(), generationId, leaseToken)
+    .bind(
+      Math.max(25, Math.min(75, progress)),
+      notice?.code ?? null,
+      notice?.message.slice(0, 800) ?? null,
+      new Date(Date.now() + pollAfterMs).toISOString(),
+      nowIso(),
+      generationId,
+      leaseToken,
+    )
     .run();
   if (!result.meta.changes) throw new ApiError(409, "GENERATION_LEASE_LOST", "生成任务执行权已过期。 ");
 }

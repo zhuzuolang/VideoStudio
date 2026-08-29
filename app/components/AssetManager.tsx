@@ -356,6 +356,13 @@ function formatAssetSize(sizeBytes?: number | null): string | null {
 
 function generationPhaseLabel(generation: AssetGenerationJob): string {
   const mediaLabel = generation.mediaType === "video" ? "视频" : "图片";
+  if (generation.mediaType === "video" && generation.phase === "model") {
+    if (!generation.providerTaskId) return "正在提交官方视频任务";
+    if (generation.errorCode === "VIDEO_STATUS_SYNC_DELAYED") return "正在重新查询官方任务状态";
+    if (generation.progress >= 50) return "官方状态：生成中";
+    if (generation.progress >= 35) return "官方状态：排队中";
+    return "等待首次官方任务状态";
+  }
   return ({
     queued: "等待生成服务",
     model: `模型正在生成${mediaLabel}`,
@@ -394,6 +401,7 @@ function GenerationCard({
 }) {
   const failed = generation.status === "failed";
   const active = generation.status === "submitting" || generation.status === "queued" || generation.status === "running";
+  const pollingOfficialVideo = active && generation.mediaType === "video" && generation.phase === "model";
   const submissionUnconfirmed = generation.status === "submitting"
     && generation.errorCode === "GENERATION_SUBMISSION_UNCONFIRMED";
   const MediaIcon = generation.mediaType === "video" ? Video : ImageIcon;
@@ -424,15 +432,16 @@ function GenerationCard({
           <span>{generationPhaseLabel(generation)}</span>
         </div>
         <div
-          className={styles.generationProgress}
+          className={joinClassNames(styles.generationProgress, pollingOfficialVideo && styles.generationProgressIndeterminate)}
           role="progressbar"
-          aria-label="生成流程进度"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={generation.progress}
+          aria-label={pollingOfficialVideo ? "官方视频任务状态" : "生成流程进度"}
+          aria-valuemin={pollingOfficialVideo ? undefined : 0}
+          aria-valuemax={pollingOfficialVideo ? undefined : 100}
+          aria-valuenow={pollingOfficialVideo ? undefined : generation.progress}
+          aria-valuetext={pollingOfficialVideo ? generationPhaseLabel(generation) : undefined}
         >
-          <div><i style={{ width: `${generation.progress}%` }} /></div>
-          <span>{generation.progress}%</span>
+          <div><i style={pollingOfficialVideo ? undefined : { width: `${generation.progress}%` }} /></div>
+          <span>{pollingOfficialVideo ? "持续查询" : `${generation.progress}%`}</span>
         </div>
         {active && generation.errorMessage && (
           <div className={styles.generationPendingNote} role="status">

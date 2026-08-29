@@ -1,4 +1,5 @@
 import { beforeEach, expect, test, vi } from "vitest";
+import { ApiError } from "@/lib/server/api";
 
 const mocks = vi.hoisted(() => ({
   put: vi.fn(),
@@ -346,7 +347,12 @@ test("视频轮询中的任务释放租约，且不会重复创建供应商任�
   expect(mocks.resolveReferenceAssets).not.toHaveBeenCalled();
   expect(mocks.buildVideoRequest).not.toHaveBeenCalled();
   expect(mocks.createVideoTask).not.toHaveBeenCalled();
-  expect(mocks.getVideoTask).toHaveBeenCalledWith(expect.any(Object), "cgt-existing");
+  expect(mocks.getVideoTask).toHaveBeenCalledWith(
+    expect.any(Object),
+    "cgt-existing",
+    fetch,
+    expect.any(AbortSignal),
+  );
   expect(mocks.releaseForPolling).toHaveBeenCalledWith(
     fakeDb,
     "gen-1",
@@ -355,6 +361,47 @@ test("视频轮询中的任务释放租约，且不会重复创建供应商任�
     5_000,
   );
   expect(prepared.some((item) => item.sql.includes("CASE WHEN provider_task_id IS NULL THEN 1 ELSE 0 END"))).toBe(true);
+});
+
+test.each([
+  ["单次查询超时", new ApiError(502, "VIDEO_MODEL_TIMEOUT", "query timed out")],
+  ["网络波动", new ApiError(502, "VIDEO_MODEL_NETWORK_ERROR", "network unavailable")],
+  ["官方限流", new ApiError(429, "VIDEO_RATE_LIMITED", "rate limited")],
+  ["官方服务暂不可用", new ApiError(502, "VIDEO_PROVIDER_UNAVAILABLE", "provider unavailable")],
+])("%s时保留官方任务号并继续轮询", async (_label, queryError) => {
+  mocks.getGeneration.mockResolvedValue({
+    ...generation,
+    mediaType: "video",
+    providerTaskId: "cgt-existing",
+    status: "running",
+    progress: 55,
+    options: { resolution: "720p", duration: 8 },
+  });
+  mocks.getVideoTask.mockRejectedValueOnce(queryError);
+  const { POST } = await import("@/app/api/projects/[projectId]/assets/generate/[generationId]/route");
+  const response = await POST(new Request("http://localhost/api/projects/project-1/assets/generate/gen-1", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }), { params: Promise.resolve({ projectId: "project-1", generationId: "gen-1" }) });
+
+  expect(response.status).toBe(202);
+  expect(mocks.createVideoTask).not.toHaveBeenCalled();
+  expect(mocks.releaseForPolling).toHaveBeenCalledWith(
+    fakeDb,
+    "gen-1",
+    expect.stringMatching(/^lease_/),
+    55,
+    15_000,
+    {
+      code: "VIDEO_STATUS_SYNC_DELAYED",
+      message: expect.stringContaining("继续查询"),
+    },
+  );
+  expect(mocks.persistFailure).not.toHaveBeenCalled();
+  expect(mocks.generationFailure).not.toHaveBeenCalled();
+  expect(mocks.downloadVideo).not.toHaveBeenCalled();
+  expect(mocks.put).not.toHaveBeenCalled();
 });
 
 test("成功视频下载到 R2，并作为 video 资产完成入库", async () => {
@@ -375,7 +422,12 @@ test("成功视频下载到 R2，并作为 video 资产完成入库", async () =
 
   expect(response.status).toBe(200);
   expect(mocks.createVideoTask).not.toHaveBeenCalled();
-  expect(mocks.getVideoTask).toHaveBeenCalledWith(expect.any(Object), "cgt-existing");
+  expect(mocks.getVideoTask).toHaveBeenCalledWith(
+    expect.any(Object),
+    "cgt-existing",
+    fetch,
+    expect.any(AbortSignal),
+  );
   expect(mocks.downloadVideo).toHaveBeenCalledWith(
     "https://cdn.example.test/generated.mp4?signature=hidden",
     fetch,

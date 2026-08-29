@@ -27,6 +27,19 @@ export const dynamic = "force-dynamic";
 const LEASE_MS = 300_000;
 const LEASE_HEARTBEAT_MS = 45_000;
 const VIDEO_POLL_AFTER_MS = 5_000;
+const VIDEO_POLL_RETRY_AFTER_MS = 15_000;
+const TRANSIENT_VIDEO_TASK_QUERY_CODES = new Set([
+  "VIDEO_MODEL_TIMEOUT",
+  "VIDEO_MODEL_NETWORK_ERROR",
+  "VIDEO_RATE_LIMITED",
+  "VIDEO_PROVIDER_UNAVAILABLE",
+  "INVALID_VIDEO_TASK_RESPONSE",
+  "VIDEO_RESPONSE_STREAM_FAILED",
+]);
+
+function shouldContinueVideoTaskPolling(error: unknown): error is ApiError {
+  return error instanceof ApiError && TRANSIENT_VIDEO_TASK_QUERY_CODES.has(error.code);
+}
 
 export async function GET(request: Request, context: RouteContext<{ projectId: string; generationId: string }>): Promise<Response> {
   try {
@@ -107,7 +120,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     if (generation.status === "failed" && retry && !generation.retryable) {
       throw new ApiError(409, "GENERATION_NOT_RETRYABLE", generation.errorMessage || "当前错误无法通过重复请求解决，请修改模型配置或提示词后新建任务。");
     }
-    if (generation.status === "failed" && retry && generation.attemptCount >= 3) {
+    if (generation.status === "failed" && retry && !generation.providerTaskId && generation.attemptCount >= 3) {
       throw new ApiError(409, "GENERATION_ATTEMPT_LIMIT", "该任务已达到 3 次尝试上限，请检查模型配置后新建任务。");
     }
 
@@ -116,11 +129,12 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
     const leaseExpiresAt = new Date(Date.now() + LEASE_MS).toISOString();
     const claim = generation.status === "failed"
       ? await db.prepare(`UPDATE asset_generation_jobs SET
-          status = 'running', phase = 'model', progress = 15, attempt_count = attempt_count + 1,
+          status = 'running', phase = 'model', progress = 15,
+          attempt_count = attempt_count + CASE WHEN provider_task_id IS NULL THEN 1 ELSE 0 END,
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
           next_poll_at = NULL, updated_at = ?, started_at = ?, completed_at = NULL
         WHERE id = ? AND project_id = ? AND owner_id = ? AND status = 'failed'
-          AND dismissed_at IS NULL AND attempt_count < 3`)
+          AND dismissed_at IS NULL AND (provider_task_id IS NOT NULL OR attempt_count < 3)`)
         .bind(leaseToken, leaseExpiresAt, now, now, generationId, projectId, identity.userId).run()
       : await db.prepare(`UPDATE asset_generation_jobs SET
           status = 'running', phase = 'model', progress = MAX(progress, 15),
@@ -128,7 +142,7 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
           lease_token = ?, lease_expires_at = ?, error_code = NULL, error_message = NULL,
           next_poll_at = NULL, updated_at = ?, started_at = COALESCE(started_at, ?), completed_at = NULL
         WHERE id = ? AND project_id = ? AND owner_id = ?
-          AND dismissed_at IS NULL AND attempt_count < 3
+          AND dismissed_at IS NULL AND (provider_task_id IS NOT NULL OR attempt_count < 3)
           AND (status = 'queued' OR (status = 'running'
             AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
             AND (next_poll_at IS NULL OR next_poll_at <= ?)
@@ -212,9 +226,31 @@ export async function POST(request: Request, context: RouteContext<{ projectId: 
         return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
       }
 
-      const task = await getVideoGenerationTask(model, resolvedProviderTaskId);
+      let task: Awaited<ReturnType<typeof getVideoGenerationTask>>;
+      try {
+        task = await getVideoGenerationTask(model, resolvedProviderTaskId, fetch, leaseAbortController.signal);
+      } catch (error) {
+        if (!shouldContinueVideoTaskPolling(error)) throw error;
+        await releaseGenerationForPolling(
+          db,
+          generationId,
+          leaseToken,
+          Math.max(25, generation.progress),
+          VIDEO_POLL_RETRY_AFTER_MS,
+          {
+            code: "VIDEO_STATUS_SYNC_DELAYED",
+            message: "官方视频任务状态暂时未同步，系统会继续查询，不会停止生成。",
+          },
+        );
+        if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+        leaseHeartbeat = null;
+        leaseToken = "";
+        return ok({ generation: await getAssetGeneration(db, projectId, identity.userId, generationId) }, { status: 202 });
+      }
       if (task.status === "queued" || task.status === "running") {
-        const progress = task.status === "queued" ? 35 : Math.max(50, generation.progress);
+        const progress = task.status === "queued"
+          ? Math.max(35, generation.progress)
+          : Math.max(50, generation.progress);
         await releaseGenerationForPolling(db, generationId, leaseToken, progress, VIDEO_POLL_AFTER_MS);
         if (leaseHeartbeat) clearInterval(leaseHeartbeat);
         leaseHeartbeat = null;

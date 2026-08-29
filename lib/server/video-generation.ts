@@ -10,8 +10,8 @@ import { validateModelEndpoint, validatePublicHttpsUrl } from "./outbound";
 
 const MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const MAX_GENERATED_VIDEO_BYTES = 100 * 1024 * 1024;
-const TASK_CREATE_REQUEST_TIMEOUT_MS = 120_000;
 const TASK_STATUS_REQUEST_TIMEOUT_MS = 30_000;
+const CONNECTION_TEST_TIMEOUT_MS = 30_000;
 const VIDEO_DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_VIDEO_REDIRECTS = 3;
 const MAX_REFERENCE_IMAGE_BYTES = 30 * 1024 * 1024;
@@ -287,9 +287,7 @@ export async function createVideoGenerationTask(
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(request),
       redirect: "manual",
-      signal: input.signal
-        ? AbortSignal.any([input.signal, AbortSignal.timeout(TASK_CREATE_REQUEST_TIMEOUT_MS)])
-        : AbortSignal.timeout(TASK_CREATE_REQUEST_TIMEOUT_MS),
+      ...(input.signal ? { signal: input.signal } : {}),
     });
   } catch (error) {
     throw taskNetworkError(error, input.signal, "提交");
@@ -310,12 +308,16 @@ export async function getVideoGenerationTask(
   model: Record<string, unknown>,
   taskId: string,
   fetchImpl: typeof fetch = fetch,
+  externalSignal?: AbortSignal,
 ): Promise<VideoGenerationTask> {
   assertModelReady(model);
   // Resolving the profile here prevents a generic text/image endpoint from being polled as a video task.
   seedanceRequestProfile(model);
   const { endpoint: collectionEndpoint, apiKey } = await modelConnection(model);
   const endpoint = await validateModelEndpoint(videoGenerationTaskEndpoint(collectionEndpoint, taskId));
+  const requestSignal = externalSignal
+    ? AbortSignal.any([externalSignal, AbortSignal.timeout(TASK_STATUS_REQUEST_TIMEOUT_MS)])
+    : AbortSignal.timeout(TASK_STATUS_REQUEST_TIMEOUT_MS);
 
   let response: Response;
   try {
@@ -323,10 +325,10 @@ export async function getVideoGenerationTask(
       method: "GET",
       headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
       redirect: "manual",
-      signal: AbortSignal.timeout(TASK_STATUS_REQUEST_TIMEOUT_MS),
+      signal: requestSignal,
     });
   } catch (error) {
-    throw taskNetworkError(error, undefined, "查询");
+    throw taskNetworkError(error, externalSignal, "查询");
   }
   rejectTaskRedirect(response);
   const { result, rawText } = await parseProviderResponse(response);
@@ -384,7 +386,7 @@ export async function testVideoGenerationConnection(
       method: "GET",
       headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
       redirect: "manual",
-      signal: AbortSignal.timeout(TASK_STATUS_REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(CONNECTION_TEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw taskNetworkError(error, undefined, "验证");

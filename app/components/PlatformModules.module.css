@@ -1582,6 +1582,12 @@
   transition: width 240ms ease;
 }
 
+.generationProgressIndeterminate i {
+  width: 34%;
+  min-width: 34%;
+  animation: generationPolling 1.4s ease-in-out infinite alternate;
+}
+
 .generationCardFailed .generationProgress i {
   background: var(--module-danger);
 }
@@ -2209,6 +2215,16 @@
 @keyframes moduleSpin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes generationPolling {
+  from {
+    transform: translateX(-8%);
+  }
+
+  to {
+    transform: translateX(202%);
   }
 }
 

@@ -266,18 +266,25 @@ describe("异步任务创建和查询", () => {
     );
   });
 
-  test("创建任务为参考素材预处理保留 120 秒响应窗口", async () => {
+  test("创建任务不设置固定截止，只透传外部租约信号", async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: "cgt-slow-create" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    })) as unknown as typeof fetch;
+    const controller = new AbortController();
+    const calls: RequestInit[] = [];
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init ?? {});
+      return new Response(JSON.stringify({ id: "cgt-slow-create" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
 
     try {
       await expect(createVideoGenerationTask(configuredModel(3), {
         prompt: "多参考图视频",
+        signal: controller.signal,
       }, fetchImpl)).resolves.toEqual({ taskId: "cgt-slow-create" });
-      expect(timeoutSpy).toHaveBeenCalledWith(120_000);
+      expect(calls[0].signal).toBe(controller.signal);
+      expect(timeoutSpy).not.toHaveBeenCalled();
     } finally {
       timeoutSpy.mockRestore();
     }
@@ -299,17 +306,22 @@ describe("异步任务创建和查询", () => {
   });
 
   test("查询成功任务，提取视频、尾帧和 usage", async () => {
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
-      id: "cgt-success",
-      status: "succeeded",
-      content: {
-        video_url: "https://cdn.example.com/result.mp4?signature=secret",
-        last_frame_url: "https://cdn.example.com/last.png",
-      },
-      usage: { completion_tokens: 1234, total_tokens: 1234 },
-    }), { status: 200 })) as unknown as typeof fetch;
+    const controller = new AbortController();
+    let querySignal: AbortSignal | null = null;
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      querySignal = init?.signal as AbortSignal;
+      return new Response(JSON.stringify({
+        id: "cgt-success",
+        status: "succeeded",
+        content: {
+          video_url: "https://cdn.example.com/result.mp4?signature=secret",
+          last_frame_url: "https://cdn.example.com/last.png",
+        },
+        usage: { completion_tokens: 1234, total_tokens: 1234 },
+      }), { status: 200 });
+    }) as unknown as typeof fetch;
 
-    await expect(getVideoGenerationTask(configuredModel(), "cgt-success", fetchImpl)).resolves.toEqual({
+    await expect(getVideoGenerationTask(configuredModel(), "cgt-success", fetchImpl, controller.signal)).resolves.toEqual({
       status: "succeeded",
       videoUrl: "https://cdn.example.com/result.mp4?signature=secret",
       lastFrameUrl: "https://cdn.example.com/last.png",
@@ -319,6 +331,10 @@ describe("异步任务创建和查询", () => {
       "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/cgt-success",
       expect.objectContaining({ method: "GET", redirect: "manual" }),
     );
+    expect(querySignal).not.toBe(controller.signal);
+    expect(querySignal?.aborted).toBe(false);
+    controller.abort();
+    expect(querySignal?.aborted).toBe(true);
   });
 
   test("查询失败任务时保留经过清洗的供应商错误", async () => {

@@ -369,6 +369,56 @@ describe("AssetManager 审查项回归", () => {
     ).toBeVisible();
   });
 
+  test("视频卡片展示官方离散状态，并把临时查询故障保留为生成中提示", async () => {
+    const queuedJob = makeGenerationJob({
+      id: "gen-video-queued",
+      mediaType: "video",
+      name: "官方排队任务",
+      status: "running",
+      phase: "model",
+      progress: 35,
+      providerTaskId: "cgt-queued",
+      canRun: false,
+    });
+    const delayedJob = makeGenerationJob({
+      id: "gen-video-delayed",
+      mediaType: "video",
+      name: "状态同步任务",
+      status: "running",
+      phase: "model",
+      progress: 55,
+      providerTaskId: "cgt-running",
+      errorCode: "VIDEO_STATUS_SYNC_DELAYED",
+      errorMessage: "官方视频任务状态暂时未同步，系统会继续查询，不会停止生成。",
+      canRun: false,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/assets/generate")) return jsonResponse({ generations: [queuedJob, delayedJob] });
+        if (url.endsWith("/assets") || url.endsWith("/characters") || url === "/api/models") return jsonResponse([]);
+        throw new Error(`unexpected request: ${url}`);
+      }),
+    );
+
+    render(<AssetManager projectId="project-1" />);
+
+    const queuedCard = (await screen.findByRole("heading", { name: "官方排队任务" })).closest("article");
+    expect(queuedCard).not.toBeNull();
+    expect(within(queuedCard as HTMLElement).getByText("官方状态：排队中")).toBeVisible();
+    const officialProgress = within(queuedCard as HTMLElement).getByRole("progressbar", { name: "官方视频任务状态" });
+    expect(officialProgress).not.toHaveAttribute("aria-valuenow");
+    expect(officialProgress).toHaveAttribute("aria-valuetext", "官方状态：排队中");
+    expect(within(queuedCard as HTMLElement).getByText("持续查询")).toBeVisible();
+
+    const delayedCard = screen.getByRole("heading", { name: "状态同步任务" }).closest("article");
+    expect(delayedCard).not.toBeNull();
+    expect(within(delayedCard as HTMLElement).getByText("正在重新查询官方任务状态")).toBeVisible();
+    expect(within(delayedCard as HTMLElement).getByText(/不会停止生成/)).toBeVisible();
+    expect(within(delayedCard as HTMLElement).queryByRole("alert")).toBeNull();
+  });
+
   test("视频参考图只列出已就绪项目图片，并按重排后的顺序与角色提交", async () => {
     const model = makeModel({
       id: "seedance-2-5",

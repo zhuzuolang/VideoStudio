@@ -1,6 +1,10 @@
 import { expect, test, vi } from "vitest";
 import { ApiError } from "@/lib/server/api";
-import { generationFailure, serializeAssetGeneration } from "@/lib/server/asset-generation-jobs";
+import {
+  generationFailure,
+  releaseGenerationForPolling,
+  serializeAssetGeneration,
+} from "@/lib/server/asset-generation-jobs";
 
 vi.mock("@/lib/server/store", () => ({ allRows: vi.fn() }));
 
@@ -66,6 +70,61 @@ test("达到三次尝试或已归档的任务不会再次被 runner 认领", () 
   expect(serializeAssetGeneration({ ...baseRow, dismissedAt: "2026-08-23T01:00:00.000Z" })).toMatchObject({
     canRun: false,
   });
+  expect(serializeAssetGeneration({
+    ...baseRow,
+    mediaType: "video",
+    optionsJson: "{}",
+    providerTaskId: "cgt-existing",
+    attemptCount: 3,
+    leaseToken: null,
+    leaseExpiresAt: null,
+  })).toMatchObject({
+    canRun: true,
+    retryable: true,
+  });
+});
+
+test("状态查询延迟提示会随租约释放写入，并在恢复后清除", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-29T10:00:00.000Z"));
+  const statements: Array<{ sql: string; values: unknown[] }> = [];
+  const db = {
+    prepare: vi.fn((sql: string) => {
+      const statement = {
+        sql,
+        values: [] as unknown[],
+        bind(...values: unknown[]) {
+          this.values = values;
+          statements.push({ sql, values });
+          return this;
+        },
+        run: vi.fn(async () => ({ meta: { changes: 1 } })),
+      };
+      return statement;
+    }),
+  } as unknown as D1Database;
+
+  try {
+    await releaseGenerationForPolling(db, "gen-1", "lease-1", 55, 15_000, {
+      code: "VIDEO_STATUS_SYNC_DELAYED",
+      message: "官方状态暂时未同步，系统会继续查询。",
+    });
+    await releaseGenerationForPolling(db, "gen-1", "lease-2", 60, 5_000);
+
+    expect(statements[0].sql).toContain("error_code = ?, error_message = ?");
+    expect(statements[0].values).toEqual([
+      55,
+      "VIDEO_STATUS_SYNC_DELAYED",
+      "官方状态暂时未同步，系统会继续查询。",
+      "2026-08-29T10:00:15.000Z",
+      "2026-08-29T10:00:00.000Z",
+      "gen-1",
+      "lease-1",
+    ]);
+    expect(statements[1].values.slice(0, 3)).toEqual([60, null, null]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("视频轮询尊重 nextPollAt，丢失供应商任务号时不自动重提", () => {
